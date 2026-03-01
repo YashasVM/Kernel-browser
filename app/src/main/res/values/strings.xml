@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Kernel</string>
+    <string name="search_hint">Search or enter URL</string>
+    <string name="tab_count">%d tabs</string>
+    <string name="new_tab">New Tab</string>
+    <string name="close_tab">Close Tab</string>
+    <string name="settings">Settings</string>
+    <string name="extensions">Extensions</string>
+    <string name="install_extension">Install Extension</string>
+    <string name="uninstall_extension">Uninstall</string>
+    <string name="extension_enabled">Enabled</string>
+    <string name="extension_disabled">Disabled</string>
+    <string name="installed">INSTALLED</string>
+    <string name="recommended">RECOMMENDED</string>
+    <string name="from_file">FROM FILE</string>
+    <string name="loading">Loading…</string>
+    <string name="search_engine">Search Engine</string>
+    <string name="privacy">Privacy</string>
+    <string name="about">About</string>
+    <string name="version">Version %s</string>
+    <string name="import_xpi">Import .xpi file</string>
+</resources>

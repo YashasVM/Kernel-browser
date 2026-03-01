@@ -1,0 +1,61 @@
+[versions]
+agp = "8.5.2"
+kotlin = "2.0.10"
+ksp = "2.0.10-1.0.24"
+compose-bom = "2024.09.00"
+# GeckoView and Mozilla Components MUST be pinned to the same Firefox version
+geckoview = "128.0.20240708210052"
+mozilla-components = "128.0"
+hilt = "2.52"
+datastore = "1.1.1"
+navigation = "2.8.1"
+activity-compose = "1.9.2"
+lifecycle = "2.8.5"
+core-ktx = "1.13.1"
+google-fonts = "1.7.0"
+
+[libraries]
+# AndroidX Core
+androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "core-ktx" }
+androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "activity-compose" }
+androidx-lifecycle-runtime-ktx = { module = "androidx.lifecycle:lifecycle-runtime-ktx", version.ref = "lifecycle" }
+androidx-lifecycle-viewmodel-compose = { module = "androidx.lifecycle:lifecycle-viewmodel-compose", version.ref = "lifecycle" }
+androidx-lifecycle-runtime-compose = { module = "androidx.lifecycle:lifecycle-runtime-compose", version.ref = "lifecycle" }
+androidx-navigation-compose = { module = "androidx.navigation:navigation-compose", version.ref = "navigation" }
+androidx-datastore-preferences = { module = "androidx.datastore:datastore-preferences", version.ref = "datastore" }
+
+# Compose
+compose-bom = { module = "androidx.compose:compose-bom", version.ref = "compose-bom" }
+compose-ui = { module = "androidx.compose.ui:ui" }
+compose-ui-graphics = { module = "androidx.compose.ui:ui-graphics" }
+compose-ui-tooling = { module = "androidx.compose.ui:ui-tooling" }
+compose-ui-tooling-preview = { module = "androidx.compose.ui:ui-tooling-preview" }
+compose-material3 = { module = "androidx.compose.material3:material3" }
+compose-material-icons = { module = "androidx.compose.material:material-icons-extended" }
+compose-foundation = { module = "androidx.compose.foundation:foundation" }
+compose-animation = { module = "androidx.compose.animation:animation" }
+compose-ui-text-google-fonts = { module = "androidx.compose.ui:ui-text-google-fonts", version.ref = "google-fonts" }
+
+# Hilt
+hilt-android = { module = "com.google.dagger:hilt-android", version.ref = "hilt" }
+hilt-compiler = { module = "com.google.dagger:hilt-compiler", version.ref = "hilt" }
+hilt-navigation-compose = { module = "androidx.hilt:hilt-navigation-compose", version = "1.2.0" }
+
+# GeckoView
+geckoview = { module = "org.mozilla.geckoview:geckoview-nightly", version.ref = "geckoview" }
+
+# Mozilla Android Components
+mozilla-browser-engine-gecko = { module = "org.mozilla.components:browser-engine-gecko", version.ref = "mozilla-components" }
+mozilla-browser-state = { module = "org.mozilla.components:browser-state", version.ref = "mozilla-components" }
+mozilla-browser-session-storage = { module = "org.mozilla.components:browser-session-storage", version.ref = "mozilla-components" }
+mozilla-feature-addons = { module = "org.mozilla.components:feature-addons", version.ref = "mozilla-components" }
+mozilla-feature-tabs = { module = "org.mozilla.components:feature-tabs", version.ref = "mozilla-components" }
+mozilla-feature-session = { module = "org.mozilla.components:feature-session", version.ref = "mozilla-components" }
+mozilla-support-webextensions = { module = "org.mozilla.components:support-webextensions", version.ref = "mozilla-components" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+hilt = { id = "com.google.dagger.hilt.android", version.ref = "hilt" }
+ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }

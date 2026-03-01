@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="kernel_black">#FF0A0A0A</color>
+    <color name="kernel_surface">#FF141414</color>
+    <color name="kernel_surface_variant">#FF1E1E1E</color>
+    <color name="kernel_accent">#FFD4FF00</color>
+    <color name="kernel_white">#FFF5F5F5</color>
+    <color name="kernel_muted">#FF888888</color>
+    <color name="kernel_error">#FFFF3B3B</color>
+</resources>
