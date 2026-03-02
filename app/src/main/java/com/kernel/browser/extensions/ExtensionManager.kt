@@ -1,7 +1,6 @@
 package com.kernel.browser.extensions
 
 import android.net.Uri
-import com.kernel.browser.engine.ExtensionContentDelegate
 import com.kernel.browser.extensions.models.ExtensionAction
 import com.kernel.browser.extensions.models.KernelExtension
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -32,24 +31,19 @@ class ExtensionManager @Inject constructor(
     private val webExtensions = mutableMapOf<String, WebExtension>()
 
     fun initialize() {
-        controller.list().then { extensions ->
+        controller.list().accept { extensions ->
             extensions?.forEach { ext -> registerExtension(ext) }
-            null
         }
     }
 
     fun installFromAmo(amoUrl: String, onResult: (Boolean) -> Unit) {
-        controller.install(amoUrl).then { ext ->
+        controller.install(amoUrl).accept { ext ->
             if (ext != null) {
                 registerExtension(ext)
                 onResult(true)
             } else {
                 onResult(false)
             }
-            null
-        }.exceptionally { e ->
-            onResult(false)
-            null
         }
     }
 
@@ -59,17 +53,13 @@ class ExtensionManager @Inject constructor(
             onResult(false)
             return
         }
-        controller.install(fileUri).then { ext ->
+        controller.install(fileUri).accept { ext ->
             if (ext != null) {
                 registerExtension(ext)
                 onResult(true)
             } else {
                 onResult(false)
             }
-            null
-        }.exceptionally { e ->
-            onResult(false)
-            null
         }
     }
 
@@ -79,22 +69,20 @@ class ExtensionManager @Inject constructor(
             return
         }
         if (enabled) {
-            controller.enable(ext, WebExtensionController.EnableSource.USER).then { updated ->
+            controller.enable(ext, WebExtensionController.EnableSource.USER).accept { updated ->
                 if (updated != null) {
                     webExtensions[extensionId] = updated
                     updateExtensionState(extensionId) { it.copy(isEnabled = true) }
                 }
                 onResult(updated != null)
-                null
             }
         } else {
-            controller.disable(ext, WebExtensionController.EnableSource.USER).then { updated ->
+            controller.disable(ext, WebExtensionController.EnableSource.USER).accept { updated ->
                 if (updated != null) {
                     webExtensions[extensionId] = updated
                     updateExtensionState(extensionId) { it.copy(isEnabled = false) }
                 }
                 onResult(updated != null)
-                null
             }
         }
     }
@@ -104,56 +92,57 @@ class ExtensionManager @Inject constructor(
             onResult(false)
             return
         }
-        controller.uninstall(ext).then {
+        controller.uninstall(ext).accept {
             webExtensions.remove(extensionId)
             _installedExtensions.update { list -> list.filter { it.id != extensionId } }
             _actions.update { list -> list.filter { it.extensionId != extensionId } }
             onResult(true)
-            null
-        }.exceptionally { e ->
-            onResult(false)
-            null
         }
-    }
-
-    fun getPopupSession(extensionId: String): String? {
-        val ext = webExtensions[extensionId] ?: return null
-        val action = ext.metaData?.let { null } // popup is per-action
-        return null // handled via ExtensionPopupManager
     }
 
     private fun registerExtension(ext: WebExtension) {
         webExtensions[ext.id] = ext
 
+        val meta = ext.metaData
         val kernelExt = KernelExtension(
             id = ext.id,
-            name = ext.metaData?.name ?: ext.id,
-            description = ext.metaData?.description ?: "",
-            version = ext.metaData?.version ?: "",
-            isEnabled = ext.metaData?.enabled ?: true,
+            name = meta?.name ?: ext.id,
+            description = meta?.description ?: "",
+            version = meta?.version ?: "",
+            isEnabled = meta?.enabled ?: true,
             isInstalled = true,
-            hasPopup = ext.metaData?.browserActionUrl != null,
-            popupUrl = ext.metaData?.browserActionUrl,
         )
 
         _installedExtensions.update { list ->
             list.filter { it.id != ext.id } + kernelExt
         }
 
-        ext.setActionDelegate(ExtensionContentDelegate(
-            onBrowserAction = { _, action -> handleAction(ext.id, action) },
-            onPageAction = { _, action -> handleAction(ext.id, action) },
-        ))
+        ext.setActionDelegate(object : WebExtension.ActionDelegate {
+            override fun onBrowserAction(
+                extension: WebExtension,
+                session: org.mozilla.geckoview.GeckoSession?,
+                action: WebExtension.Action,
+            ) {
+                handleAction(ext.id, action)
+            }
+
+            override fun onPageAction(
+                extension: WebExtension,
+                session: org.mozilla.geckoview.GeckoSession?,
+                action: WebExtension.Action,
+            ) {
+                handleAction(ext.id, action)
+            }
+        })
     }
 
     private fun handleAction(extensionId: String, action: WebExtension.Action) {
         val extAction = ExtensionAction(
             extensionId = extensionId,
             title = action.title,
-            icon = action.icon,
             badgeText = action.badgeText,
             badgeColor = action.badgeBackgroundColor,
-            enabled = action.isEnabled ?: true,
+            enabled = action.enabled ?: true,
         )
         _actions.update { list ->
             list.filter { it.extensionId != extensionId } + extAction

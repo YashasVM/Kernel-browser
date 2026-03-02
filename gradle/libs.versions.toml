@@ -1,12 +1,12 @@
 [versions]
-agp = "8.5.2"
-kotlin = "2.0.10"
-ksp = "2.0.10-1.0.24"
+agp = "9.0.1"
+kotlin = "2.3.10"
+ksp = "2.3.6"
 compose-bom = "2024.09.00"
 # GeckoView and Mozilla Components MUST be pinned to the same Firefox version
 geckoview = "149.0.20260223091613"
 mozilla-components = "149.0b2"
-hilt = "2.52"
+hilt = "2.59.2"
 datastore = "1.1.1"
 navigation = "2.8.1"
 activity-compose = "1.9.2"

@@ -13,8 +13,6 @@ import com.kernel.browser.settings.SettingsViewModel
 import com.kernel.browser.ui.navigation.KernelApp
 import com.kernel.browser.ui.theme.KernelTheme
 import dagger.hilt.android.AndroidEntryPoint
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import org.mozilla.geckoview.GeckoView
 
@@ -58,7 +56,6 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 tabsViewModel.currentSession
-                    .distinctUntilChanged()
                     .collect { session ->
                         try {
                             geckoView.releaseSession()
