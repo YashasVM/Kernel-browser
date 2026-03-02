@@ -79,10 +79,7 @@ dependencies {
     ksp(libs.hilt.compiler)
     implementation(libs.hilt.navigation.compose)
 
-    // GeckoView
-    implementation(libs.geckoview)
-
-    // Mozilla Android Components
+    // Mozilla Android Components (brings in GeckoView transitively via browser-engine-gecko)
     implementation(libs.mozilla.browser.engine.gecko)
     implementation(libs.mozilla.browser.state)
     implementation(libs.mozilla.browser.session.storage)
