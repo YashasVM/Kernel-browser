@@ -1,0 +1,18 @@
+<resources>
+    <string name="app_name">Kernel Browser</string>
+    <string name="home_url">https://www.google.com</string>
+    <string name="address_hint">Search or enter address</string>
+    <string name="action_back">Back</string>
+    <string name="action_forward">Forward</string>
+    <string name="action_reload">Reload</string>
+    <string name="action_stop">Stop</string>
+    <string name="action_home">Home</string>
+    <string name="action_tabs">Tabs</string>
+    <string name="action_extensions">Extensions</string>
+    <string name="action_settings">Settings</string>
+    <string name="extensions_title">Extensions</string>
+    <string name="enable_extension">Enable</string>
+    <string name="open_extension">Open</string>
+    <string name="waiting_for_extension">Waiting</string>
+    <string name="extension_not_ready">Extension setup refreshed. Open Extensions again in a moment.</string>
+</resources>

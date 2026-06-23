@@ -1,0 +1,17 @@
+<resources>
+    <color name="kernel_background">#202124</color>
+    <color name="kernel_surface">#2A2B2F</color>
+    <color name="kernel_surface_alt">#34363A</color>
+    <color name="kernel_surface_elevated">#242529</color>
+    <color name="kernel_chrome">#CC25262A</color>
+    <color name="kernel_address_surface">#D934363B</color>
+    <color name="kernel_text">#F2F3F5</color>
+    <color name="kernel_muted">#C0C3CA</color>
+    <color name="kernel_border">#4A4D54</color>
+    <color name="kernel_accent">#7AB7FF</color>
+    <color name="kernel_tab_accent">#FF725C</color>
+    <color name="kernel_logo_background">#050506</color>
+    <color name="kernel_danger">#FF6B7A</color>
+    <color name="kernel_disabled">#70747C</color>
+    <color name="kernel_scrim">#99000000</color>
+</resources>
