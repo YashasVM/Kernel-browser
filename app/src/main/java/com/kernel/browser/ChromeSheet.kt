@@ -13,10 +13,10 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import android.view.animation.DecelerateInterpolator
+import android.view.animation.PathInterpolator
 
 object ChromeSheet {
-    private val sheetInterpolator = DecelerateInterpolator(1.6f)
+    private val sheetInterpolator = PathInterpolator(0.2f, 0f, 0f, 1f)
 
     fun show(
         context: Context,
@@ -32,6 +32,8 @@ object ChromeSheet {
             orientation = LinearLayout.VERTICAL
             setBackgroundResource(R.drawable.sheet_background)
             setPadding(dp(context, 20), dp(context, 10), dp(context, 20), dp(context, 16))
+            alpha = 0f
+            translationY = dp(context, 36).toFloat()
         }
 
         sheet.addView(View(context).apply {
@@ -62,20 +64,28 @@ object ChromeSheet {
         }
 
         dialog.setContentView(sheet)
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            attributes = attributes.apply { windowAnimations = 0 }
+            setDimAmount(0.36f)
+            addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            setGravity(Gravity.BOTTOM)
+            setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        }
         dialog.setOnShowListener {
             dialog.window?.apply {
                 setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+                attributes = attributes.apply { windowAnimations = 0 }
                 setDimAmount(0.36f)
                 addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
                 setGravity(Gravity.BOTTOM)
                 setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             }
-            sheet.alpha = 0f
-            sheet.translationY = dp(context, 28).toFloat()
+            sheet.animate().cancel()
             sheet.animate()
                 .alpha(1f)
                 .translationY(0f)
-                .setDuration(220L)
+                .setDuration(260L)
                 .setInterpolator(sheetInterpolator)
                 .start()
         }
