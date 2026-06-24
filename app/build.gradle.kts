@@ -2,9 +2,9 @@ plugins {
     id("com.android.application")
 }
 
-val appVersionCode = 10
-val appVersionName = "0.1.9"
-val uiBuildTag = "polished-google-tabs-ui-2026-06-23"
+val appVersionCode = 12
+val appVersionName = "1.10"
+val uiBuildTag = "v1.10-safari-suggestions-2026-06-24"
 
 android {
     namespace = "com.kernel.browser"
