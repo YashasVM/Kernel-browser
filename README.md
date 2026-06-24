@@ -176,6 +176,12 @@ Latest release notes are in [docs/releases/v1.10.md](docs/releases/v1.10.md).
 ---
 
 <p align="center">
-  <sub>Made by <strong>@yashas.vm</strong></sub><br>
+  <a href="https://github.com/YashasVM">
+    <img src="https://avatars.githubusercontent.com/u/95484845?v=4" width="64" height="64" alt="YashasVM GitHub avatar">
+  </a>
+</p>
+
+<p align="center">
+  <sub>Made by <a href="https://github.com/YashasVM"><strong>@yashas.vm</strong></a> / <a href="https://github.com/YashasVM">YashasVM</a></sub><br>
   <sub>Small, fast, and still getting sharper with every build.</sub>
 </p>
