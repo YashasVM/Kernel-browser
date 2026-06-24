@@ -13,7 +13,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.Window
 import android.view.WindowManager
-import android.view.animation.DecelerateInterpolator
+import android.view.animation.PathInterpolator
 import android.widget.FrameLayout
 import android.widget.ImageButton
 import android.widget.ImageView
@@ -39,7 +39,7 @@ class SettingsDialogController(
     private val openHistoryEntry: (String) -> Unit = {},
     private val clearHistory: () -> Unit = {}
 ) {
-    private val motionInterpolator = DecelerateInterpolator(1.6f)
+    private val motionInterpolator = PathInterpolator(0.2f, 0f, 0f, 1f)
 
     fun show() {
         val dialog = Dialog(context)
@@ -97,6 +97,8 @@ class SettingsDialogController(
         val content = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(ChromeSheet.dp(context, 22), ChromeSheet.dp(context, 18), ChromeSheet.dp(context, 22), ChromeSheet.dp(context, 28))
+            alpha = 0f
+            translationY = ChromeSheet.dp(context, 32).toFloat()
         }
 
         content.addView(header(dialog))
@@ -182,6 +184,19 @@ class SettingsDialogController(
         ))
 
         dialog.setContentView(root)
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
+            clearFlags(WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS)
+            addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS)
+            attributes = attributes.apply { windowAnimations = 0 }
+            setDimAmount(0f)
+            setGravity(Gravity.CENTER)
+            setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            statusBarColor = context.getColor(R.color.kernel_background)
+            navigationBarColor = context.getColor(R.color.kernel_background)
+            decorView.systemUiVisibility = 0
+        }
         dialog.setOnDismissListener {
             statusOverlay?.let { overlay ->
                 (overlay.parent as? ViewGroup)?.removeView(overlay)
@@ -208,12 +223,11 @@ class SettingsDialogController(
                 navigationBarColor = context.getColor(R.color.kernel_background)
                 decorView.systemUiVisibility = 0
             }
-            content.alpha = 0f
-            content.translationY = ChromeSheet.dp(context, 18).toFloat()
+            content.animate().cancel()
             content.animate()
                 .alpha(1f)
                 .translationY(0f)
-                .setDuration(220L)
+                .setDuration(260L)
                 .setInterpolator(motionInterpolator)
                 .start()
         }
