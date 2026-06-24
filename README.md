@@ -24,6 +24,12 @@
 
 ---
 
+## Description
+
+Kernel Browser is a native Android browser focused on a clean, Safari-like mobile experience while running on Mozilla GeckoView instead of Chromium WebView. It combines bottom-first browser controls, Google search suggestions, visited-site autofill, private tabs, tab previews, and bundled extension support in a lightweight Kotlin app shell.
+
+---
+
 > [!IMPORTANT]
 > Kernel Browser is still an early Android browser project. Use the ABI-specific APK for your device; modern Samsung/Pixel phones should install the `arm64-v8a` APK from [v1.10](https://github.com/YashasVM/Kernel-browser/releases/tag/v1.10).
 
