@@ -15,7 +15,6 @@
   <img src="https://img.shields.io/github/stars/YashasVM/Kernel-browser?style=flat-square&color=111111&label=stars" alt="Stars">
   <img src="https://img.shields.io/github/v/release/YashasVM/Kernel-browser?style=flat-square&color=111111&label=release" alt="Release">
   <img src="https://img.shields.io/badge/android-GeckoView-111111?style=flat-square" alt="Android GeckoView">
-  <img src="https://img.shields.io/badge/license-MIT-111111?style=flat-square" alt="MIT license">
 </p>
 
 <p align="center">
@@ -176,6 +175,7 @@ Latest release notes are in [docs/releases/v1.10.md](docs/releases/v1.10.md).
 
 ---
 
-## License
-
-MIT. See [LICENSE](LICENSE).
+<p align="center">
+  <sub>Made by <strong>@yashas.vm</strong></sub><br>
+  <sub>Small, fast, and still getting sharper with every build.</sub>
+</p>
