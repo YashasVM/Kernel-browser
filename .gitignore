@@ -8,3 +8,15 @@ app/build/
 app/src/main/assets/extensions/
 app/src/main/assets/extensions.json
 extensions-cache/
+
+# Local QA captures
+artifacts-*.png
+artifacts-*.xml
+kb-*.png
+kb-*.xml
+release-*.png
+release-*.xml
+settings-*.png
+settings-*.xml
+tabs-*.png
+tabs-*.xml
