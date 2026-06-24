@@ -5,19 +5,25 @@ import android.os.Handler
 import android.os.Looper
 import android.os.Build
 import android.graphics.Bitmap
-import android.graphics.Color
+import android.content.res.ColorStateList
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.animation.PathInterpolator
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
+import android.text.Editable
+import android.text.TextWatcher
 import android.content.Context
 import android.app.Activity
 import android.content.res.Configuration
 import android.widget.FrameLayout
+import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.TextView
 import com.kernel.browser.databinding.ActivityMainBinding
 import com.kernel.browser.extensions.ExtensionActionRegistry
 import com.kernel.browser.extensions.ExtensionInstaller
@@ -29,6 +35,10 @@ import org.mozilla.geckoview.AllowOrDeny
 import org.mozilla.geckoview.GeckoResult
 import org.mozilla.geckoview.GeckoRuntime
 import org.mozilla.geckoview.GeckoSession
+import org.json.JSONArray
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
 
 class MainActivity : Activity() {
     private lateinit var binding: ActivityMainBinding
@@ -42,9 +52,25 @@ class MainActivity : Activity() {
     private var bottomInset = 0
     private var chromeHidden = false
     private var addressBarEditing = false
+    private var suggestionsVisible = false
+    private var suggestionRequestId = 0
+    private val searchRecommendationCache = mutableMapOf<String, List<String>>()
     private val chromeHandler = Handler(Looper.getMainLooper())
     private val chromeInterpolator = PathInterpolator(0.2f, 0f, 0f, 1f)
     private val hideChromeRunnable = Runnable { setChromeVisible(false, auto = true) }
+
+    private data class AddressSuggestion(
+        val title: String,
+        val subtitle: String,
+        val value: String,
+        val kind: SuggestionKind
+    )
+
+    private enum class SuggestionKind {
+        HISTORY,
+        SEARCH,
+        NAVIGATE
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -157,10 +183,23 @@ class MainActivity : Activity() {
             if (hasFocus) {
                 cancelChromeAutoHide()
                 setChromeVisible(true)
+                updateAddressSuggestions()
             } else {
+                hideAddressSuggestions()
                 scheduleChromeAutoHide()
             }
         }
+        binding.addressBar.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                if (binding.addressBar.hasFocus()) {
+                    updateAddressSuggestions()
+                }
+            }
+
+            override fun afterTextChanged(s: Editable?) = Unit
+        })
         addressBarEditing = false
         binding.addressBar.clearFocus()
     }
@@ -194,7 +233,10 @@ class MainActivity : Activity() {
             params.width = chromeWidth()
             params.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
             binding.bottomChrome.layoutParams = params
-            binding.bottomChrome.post { updateGeckoChromeInsets() }
+            binding.bottomChrome.post {
+                updateSuggestionPanelPosition()
+                updateGeckoChromeInsets()
+            }
             insets
         }
         binding.root.requestApplyInsets()
@@ -328,10 +370,225 @@ class MainActivity : Activity() {
         val normalized = UrlNormalizer.normalize(binding.addressBar.text.toString())
         tabs.activeTab?.session?.loadUri(normalized)
         addressBarEditing = false
+        hideAddressSuggestions()
         binding.addressBar.clearFocus()
         val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
         imm.hideSoftInputFromWindow(binding.addressBar.windowToken, 0)
         setChromeVisible(true)
+    }
+
+    private fun loadSuggestion(suggestion: AddressSuggestion) {
+        val url = when (suggestion.kind) {
+            SuggestionKind.HISTORY -> suggestion.value
+            SuggestionKind.NAVIGATE -> UrlNormalizer.normalize(suggestion.value)
+            SuggestionKind.SEARCH -> UrlNormalizer.normalize(suggestion.value)
+        }
+        binding.addressBar.setText(suggestion.value)
+        binding.addressBar.setSelection(binding.addressBar.text.length)
+        tabs.activeTab?.session?.loadUri(url)
+        addressBarEditing = false
+        hideAddressSuggestions()
+        binding.addressBar.clearFocus()
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+        imm.hideSoftInputFromWindow(binding.addressBar.windowToken, 0)
+        setChromeVisible(true)
+    }
+
+    private fun updateAddressSuggestions() {
+        val query = binding.addressBar.text.toString().trim()
+        if (!binding.addressBar.hasFocus()) {
+            hideAddressSuggestions()
+            return
+        }
+
+        val localSuggestions = localAddressSuggestions(query)
+        val cachedRecommendations = searchRecommendationCache[query.lowercase()].orEmpty()
+        renderAddressSuggestions((localSuggestions + cachedRecommendations.map {
+            AddressSuggestion(it, "Search Google", it, SuggestionKind.SEARCH)
+        }).distinctBy { it.kind.name + it.value }.take(4))
+
+        if (query.length >= 2 && cachedRecommendations.isEmpty()) {
+            fetchSearchRecommendations(query)
+        }
+    }
+
+    private fun localAddressSuggestions(query: String): List<AddressSuggestion> {
+        val normalizedQuery = query.lowercase()
+        val history = historyStore.entries()
+        val matches = if (query.isBlank()) {
+            history.take(5)
+        } else {
+            history.filter { (title, url) ->
+                title.lowercase().contains(normalizedQuery) || url.lowercase().contains(normalizedQuery)
+            }.take(4)
+        }.map { (title, url) ->
+            AddressSuggestion(
+                title = title.ifBlank { url },
+                subtitle = url,
+                value = url,
+                kind = SuggestionKind.HISTORY
+            )
+        }
+
+        if (query.isBlank()) return matches
+
+        val primary = if (looksLikeUrl(query)) {
+            AddressSuggestion(query, "Open website", query, SuggestionKind.NAVIGATE)
+        } else {
+            AddressSuggestion(query, "Search Google", query, SuggestionKind.SEARCH)
+        }
+
+        return listOf(primary) + matches
+    }
+
+    private fun fetchSearchRecommendations(query: String) {
+        val requestId = ++suggestionRequestId
+        Thread {
+            val recommendations = runCatching {
+                val encoded = URLEncoder.encode(query, "UTF-8")
+                val connection = URL("https://suggestqueries.google.com/complete/search?client=firefox&q=$encoded")
+                    .openConnection() as HttpURLConnection
+                connection.connectTimeout = 1_500
+                connection.readTimeout = 1_500
+                connection.setRequestProperty("User-Agent", "KernelBrowser/${BuildConfig.VERSION_NAME}")
+                connection.inputStream.bufferedReader().use { reader ->
+                    val payload = reader.readText()
+                    val array = JSONArray(payload).getJSONArray(1)
+                    List(array.length()) { index -> array.getString(index) }
+                }
+            }.getOrElse { emptyList() }
+
+            chromeHandler.post {
+                if (requestId != suggestionRequestId) return@post
+                searchRecommendationCache[query.lowercase()] = recommendations
+                if (binding.addressBar.hasFocus() && binding.addressBar.text.toString().trim() == query) {
+                    updateAddressSuggestions()
+                }
+            }
+        }.start()
+    }
+
+    private fun renderAddressSuggestions(suggestions: List<AddressSuggestion>) {
+        binding.suggestionsPanel.removeAllViews()
+        if (suggestions.isEmpty()) {
+            hideAddressSuggestions()
+            return
+        }
+
+        suggestions.forEachIndexed { index, suggestion ->
+            binding.suggestionsPanel.addView(suggestionRow(suggestion), LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ChromeSheet.dp(this, 58)
+            ).apply {
+                if (index < suggestions.lastIndex) {
+                    bottomMargin = ChromeSheet.dp(this@MainActivity, 4)
+                }
+            })
+        }
+        showAddressSuggestions()
+    }
+
+    private fun suggestionRow(suggestion: AddressSuggestion): LinearLayout {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(ChromeSheet.dp(this@MainActivity, 12), 0, ChromeSheet.dp(this@MainActivity, 10), 0)
+            background = suggestionRowBackground()
+            foreground = selectableItemBackground()
+            isClickable = true
+            isFocusable = true
+            contentDescription = "${suggestion.title}, ${suggestion.subtitle}"
+            setOnClickListener { loadSuggestion(suggestion) }
+
+            addView(ImageView(this@MainActivity).apply {
+                setImageResource(if (suggestion.kind == SuggestionKind.HISTORY) R.drawable.ic_home else R.drawable.ic_search)
+                imageTintList = ColorStateList.valueOf(getColor(R.color.kernel_muted))
+                scaleType = ImageView.ScaleType.CENTER
+            }, LinearLayout.LayoutParams(ChromeSheet.dp(this@MainActivity, 30), ChromeSheet.dp(this@MainActivity, 30)).apply {
+                marginEnd = ChromeSheet.dp(this@MainActivity, 12)
+            })
+
+            addView(LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(TextView(this@MainActivity).apply {
+                    text = suggestion.title
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                    textSize = 16f
+                    includeFontPadding = false
+                    setTextColor(getColor(R.color.kernel_text))
+                })
+                addView(TextView(this@MainActivity).apply {
+                    text = suggestion.subtitle
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                    textSize = 12f
+                    includeFontPadding = false
+                    setPadding(0, ChromeSheet.dp(this@MainActivity, 3), 0, 0)
+                    setTextColor(getColor(R.color.kernel_muted))
+                })
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        }
+    }
+
+    private fun showAddressSuggestions() {
+        updateSuggestionPanelPosition()
+        if (suggestionsVisible) return
+        suggestionsVisible = true
+        binding.suggestionsPanel.visibility = View.VISIBLE
+        binding.suggestionsPanel.alpha = 0f
+        binding.suggestionsPanel.translationY = ChromeSheet.dp(this, 14).toFloat()
+        binding.suggestionsPanel.animate()
+            .alpha(1f)
+            .translationY(0f)
+            .setDuration(210L)
+            .setInterpolator(chromeInterpolator)
+            .start()
+    }
+
+    private fun hideAddressSuggestions() {
+        if (!suggestionsVisible && binding.suggestionsPanel.visibility != View.VISIBLE) return
+        suggestionsVisible = false
+        binding.suggestionsPanel.animate().cancel()
+        binding.suggestionsPanel.animate()
+            .alpha(0f)
+            .translationY(ChromeSheet.dp(this, 10).toFloat())
+            .setDuration(150L)
+            .setInterpolator(chromeInterpolator)
+            .withEndAction {
+                if (!suggestionsVisible) {
+                    binding.suggestionsPanel.visibility = View.GONE
+                    binding.suggestionsPanel.removeAllViews()
+                }
+            }
+            .start()
+    }
+
+    private fun updateSuggestionPanelPosition() {
+        val params = binding.suggestionsPanel.layoutParams as FrameLayout.LayoutParams
+        params.width = chromeWidth()
+        params.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+        params.bottomMargin = bottomInset + binding.bottomChrome.height + ChromeSheet.dp(this, 24)
+        binding.suggestionsPanel.layoutParams = params
+    }
+
+    private fun suggestionRowBackground(): android.graphics.drawable.GradientDrawable {
+        return android.graphics.drawable.GradientDrawable().apply {
+            shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+            setColor(getColor(R.color.kernel_surface_alt))
+            cornerRadius = ChromeSheet.dp(this@MainActivity, 18).toFloat()
+        }
+    }
+
+    private fun selectableItemBackground(): android.graphics.drawable.Drawable? {
+        val attrs = obtainStyledAttributes(intArrayOf(android.R.attr.selectableItemBackground))
+        return attrs.getDrawable(0).also { attrs.recycle() }
+    }
+
+    private fun looksLikeUrl(value: String): Boolean {
+        val trimmed = value.trim()
+        return trimmed.contains(".") || trimmed.startsWith("localhost", ignoreCase = true) || trimmed.startsWith("http://", ignoreCase = true) || trimmed.startsWith("https://", ignoreCase = true)
     }
 
     private fun setChromeVisible(visible: Boolean, auto: Boolean = false) {
@@ -341,6 +598,9 @@ class MainActivity : Activity() {
         }
         if (!visible || auto) {
             cancelChromeAutoHide()
+        }
+        if (!visible) {
+            hideAddressSuggestions()
         }
         chromeHidden = !visible
         val distance = binding.bottomChrome.height + bottomInset + ChromeSheet.dp(this, 24)
