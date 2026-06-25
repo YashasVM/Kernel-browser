@@ -10,10 +10,10 @@ object UrlNormalizer {
     )
     private val ipv4Pattern = Regex("^((25[0-5]|2[0-4]\\d|[01]?\\d\\d?)\\.){3}(25[0-5]|2[0-4]\\d|[01]?\\d\\d?)(:\\d{1,5})?(/.*)?$")
 
-    fun normalize(input: String): String {
+    fun normalize(input: String, searchEngine: SearchEngine = SearchEngine.GOOGLE): String {
         val trimmed = input.trim()
         if (trimmed.isEmpty()) {
-            return "https://www.google.com"
+            return BrowserPreferences.DEFAULT_HOMEPAGE
         }
 
         if (!trimmed.contains(' ') && (hostLikePattern.matches(trimmed) || ipv4Pattern.matches(trimmed))) {
@@ -25,6 +25,6 @@ object UrlNormalizer {
         }
 
         val encoded = URLEncoder.encode(trimmed, StandardCharsets.UTF_8.name())
-        return "https://www.google.com/search?q=$encoded"
+        return searchEngine.searchUrl.format(encoded)
     }
 }
