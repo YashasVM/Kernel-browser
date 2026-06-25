@@ -15,6 +15,7 @@ import android.view.Window
 import android.view.WindowManager
 import android.view.animation.PathInterpolator
 import android.widget.FrameLayout
+import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -27,6 +28,7 @@ import com.kernel.browser.extensions.AllowedExtensions
 import com.kernel.browser.extensions.ExtensionInstaller
 import com.kernel.browser.extensions.ExtensionPreferences
 import org.mozilla.geckoview.GeckoRuntime
+import org.mozilla.geckoview.GeckoSession
 import org.mozilla.geckoview.StorageController
 
 class SettingsDialogController(
@@ -34,10 +36,18 @@ class SettingsDialogController(
     private val runtime: GeckoRuntime,
     private val extensionPreferences: ExtensionPreferences,
     private val extensionInstaller: ExtensionInstaller,
+    private val browserPreferences: BrowserPreferences,
+    private val bookmarksStore: BookmarksStore,
+    private val downloadStore: DownloadStore,
+    private val loginStore: LoginStore,
+    private val downloadStatus: (DownloadStore.Entry) -> String,
+    private val openDownload: (DownloadStore.Entry) -> Unit,
+    private val removeDownload: (DownloadStore.Entry) -> Unit,
     private val resetBrowserState: () -> Unit,
     private val historyProvider: () -> List<Pair<String, String>> = { emptyList() },
     private val openHistoryEntry: (String) -> Unit = {},
-    private val clearHistory: () -> Unit = {}
+    private val clearHistory: () -> Unit = {},
+    private val onPreferencesChanged: () -> Unit = {}
 ) {
     private val motionInterpolator = PathInterpolator(0.2f, 0f, 0f, 1f)
 
@@ -137,16 +147,30 @@ class SettingsDialogController(
                 onClick = { showHistorySheet() }
             ),
             settingsRow(
+                icon = R.drawable.ic_arrow_forward,
+                title = "Downloads",
+                subtitle = "${downloadStore.entries().size} recent downloads.",
+                position = RowPosition.MIDDLE,
+                onClick = { showDownloadsSheet() }
+            ),
+            settingsRow(
+                icon = R.drawable.ic_home,
+                title = "Bookmarks",
+                subtitle = "${bookmarksStore.entries().size} saved pages.",
+                position = RowPosition.MIDDLE,
+                onClick = { showBookmarksSheet() }
+            ),
+            settingsRow(
                 icon = R.drawable.ic_settings,
                 title = "Search engine",
-                subtitle = "Address bar search provider.",
+                subtitle = browserPreferences.searchEngine.displayName,
                 position = RowPosition.MIDDLE,
                 onClick = { showSearchEngineSheet() }
             ),
             settingsRow(
                 icon = R.drawable.ic_home,
                 title = "Homepage",
-                subtitle = "On",
+                subtitle = browserPreferences.homepageUrl,
                 position = RowPosition.BOTTOM,
                 onClick = { showHomepageSheet() }
             )
@@ -156,12 +180,10 @@ class SettingsDialogController(
         content.addView(group(
             settingsRow(
                 icon = R.drawable.ic_arrow_back,
-                title = "Navigation",
-                subtitle = "Back, forward, reload, tabs, and home controls.",
+                title = "Page zoom",
+                subtitle = "${browserPreferences.pageZoomPercent}%",
                 position = RowPosition.TOP,
-                onClick = {
-                    Toast.makeText(context, "Navigation controls are in the bottom browser pill.", Toast.LENGTH_SHORT).show()
-                }
+                onClick = { showPageZoomSheet() }
             ),
             settingsRow(
                 icon = R.drawable.ic_shield,
@@ -403,22 +425,54 @@ class SettingsDialogController(
         }
     }
 
+    private fun showDownloadsSheet() {
+        ChromeSheet.show(
+            context = context,
+            title = "Downloads",
+            subtitle = "Recent files sent to Android downloads."
+        ) {
+            val downloads = downloadStore.entries()
+            if (downloads.isEmpty()) {
+                addView(ChromeSheet.note(context, "Files you download will appear here after they start."))
+            } else {
+                downloads.take(30).forEach { entry ->
+                    addView(ChromeSheet.row(
+                        context = context,
+                        title = entry.title,
+                        subtitle = "${downloadStatus(entry)} - ${entry.url}",
+                        trailing = ChromeSheet.actionButton(context, "Remove", danger = true) {
+                            removeDownload(entry)
+                        },
+                        onClick = { openDownload(entry) }
+                    ))
+                }
+                addView(ChromeSheet.actionButton(context, "Clear download history", danger = true) {
+                    downloadStore.clear()
+                    Toast.makeText(context, "Download history cleared", Toast.LENGTH_SHORT).show()
+                })
+            }
+        }
+    }
+
     private fun showSearchEngineSheet() {
         ChromeSheet.show(
             context = context,
             title = "Search engine",
             subtitle = "Address bar search provider."
         ) {
-            addView(ChromeSheet.row(
-                context = context,
-                title = "Default search",
-                subtitle = "The address bar uses the app's current search routing.",
-                trailing = ChromeSheet.statusPill(context, "On", true)
-            ))
-            addView(ChromeSheet.note(
-                context,
-                "Search provider selection needs the address bar loader to expose provider choices. This settings page is ready for that option."
-            ))
+            SearchEngine.all.forEach { engine ->
+                addView(ChromeSheet.row(
+                    context = context,
+                    title = engine.displayName,
+                    subtitle = if (engine.suggestionsUrl == null) "Search only" else "Search and suggestions",
+                    trailing = if (browserPreferences.searchEngine == engine) ChromeSheet.statusPill(context, "On", true) else null,
+                    onClick = {
+                        browserPreferences.searchEngineId = engine.id
+                        onPreferencesChanged()
+                        Toast.makeText(context, "Search engine set to ${engine.displayName}", Toast.LENGTH_SHORT).show()
+                    }
+                ))
+            }
         }
     }
 
@@ -428,16 +482,97 @@ class SettingsDialogController(
             title = "Homepage",
             subtitle = "Shown when you tap Home."
         ) {
+            val input = EditText(context).apply {
+                setText(browserPreferences.homepageUrl)
+                selectAll()
+                setSingleLine(true)
+                textSize = 16f
+                setTextColor(context.getColor(R.color.kernel_text))
+                setHintTextColor(context.getColor(R.color.kernel_muted))
+                hint = "https://example.com"
+            }
+            addView(input, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ChromeSheet.dp(context, 54)
+            ).apply {
+                bottomMargin = ChromeSheet.dp(context, 10)
+            })
+            addView(actionRow(
+                ChromeSheet.actionButton(context, "Reset") {
+                    browserPreferences.resetHomepage()
+                    onPreferencesChanged()
+                    Toast.makeText(context, "Homepage reset", Toast.LENGTH_SHORT).show()
+                },
+                ChromeSheet.actionButton(context, "Save", primary = true) {
+                    browserPreferences.homepageUrl = input.text.toString()
+                    onPreferencesChanged()
+                    Toast.makeText(context, "Homepage saved", Toast.LENGTH_SHORT).show()
+                }
+            ))
             addView(ChromeSheet.row(
                 context = context,
-                title = "Homepage",
-                subtitle = context.getString(R.string.home_url),
+                title = "Current homepage",
+                subtitle = browserPreferences.homepageUrl,
                 trailing = ChromeSheet.statusPill(context, "On", true)
             ))
-            addView(ChromeSheet.note(
-                context,
-                "The homepage is fixed in this build. A custom homepage field can be added once browser preferences are exposed."
+        }
+    }
+
+    private fun showBookmarksSheet() {
+        ChromeSheet.show(
+            context = context,
+            title = "Bookmarks",
+            subtitle = "Saved pages."
+        ) {
+            val bookmarks = bookmarksStore.entries()
+            if (bookmarks.isEmpty()) {
+                addView(ChromeSheet.note(context, "Bookmarked pages will appear here."))
+            } else {
+                bookmarks.forEach { (title, url) ->
+                    addView(ChromeSheet.row(
+                        context = context,
+                        title = title,
+                        subtitle = url
+                    ))
+                }
+                addView(ChromeSheet.actionButton(context, "Clear bookmarks", danger = true) {
+                    bookmarksStore.clear()
+                    Toast.makeText(context, "Bookmarks cleared", Toast.LENGTH_SHORT).show()
+                })
+            }
+        }
+    }
+
+    private fun showPageZoomSheet() {
+        ChromeSheet.show(
+            context = context,
+            title = "Page zoom",
+            subtitle = "Change page text size across tabs.",
+            scrollable = false
+        ) {
+            addView(ChromeSheet.row(
+                context = context,
+                title = "Current zoom",
+                subtitle = "${browserPreferences.pageZoomPercent}%",
+                trailing = ChromeSheet.statusPill(context, "${browserPreferences.pageZoomPercent}%", true)
             ))
+            addView(actionRow(
+                ChromeSheet.actionButton(context, "-") {
+                    browserPreferences.pageZoomPercent -= 10
+                    onPreferencesChanged()
+                    Toast.makeText(context, "Zoom ${browserPreferences.pageZoomPercent}%", Toast.LENGTH_SHORT).show()
+                },
+                ChromeSheet.actionButton(context, "+", primary = true) {
+                    browserPreferences.pageZoomPercent += 10
+                    onPreferencesChanged()
+                    Toast.makeText(context, "Zoom ${browserPreferences.pageZoomPercent}%", Toast.LENGTH_SHORT).show()
+                }
+            ))
+            addView(ChromeSheet.actionButton(context, "Reset") {
+                browserPreferences.pageZoomPercent = 100
+                onPreferencesChanged()
+                Toast.makeText(context, "Zoom reset", Toast.LENGTH_SHORT).show()
+            })
         }
     }
 
@@ -449,8 +584,50 @@ class SettingsDialogController(
         ) {
             addView(ChromeSheet.row(
                 context = context,
+                title = "Tracking protection",
+                subtitle = "Block known trackers, cryptominers, and fingerprinting.",
+                trailing = preferenceSwitch(browserPreferences.trackingProtection) { checked ->
+                    browserPreferences.trackingProtection = checked
+                    onPreferencesChanged()
+                }
+            ))
+            addView(ChromeSheet.row(
+                context = context,
+                title = "Third-party cookies",
+                subtitle = "Isolate cross-site cookies while keeping normal sign-in working.",
+                trailing = preferenceSwitch(browserPreferences.blockThirdPartyCookies) { checked ->
+                    browserPreferences.blockThirdPartyCookies = checked
+                    onPreferencesChanged()
+                }
+            ))
+            addView(ChromeSheet.row(
+                context = context,
+                title = "Password autofill",
+                subtitle = "${loginStore.summaries().size} saved logins.",
+                trailing = preferenceSwitch(browserPreferences.loginAutofill) { checked ->
+                    browserPreferences.loginAutofill = checked
+                    onPreferencesChanged()
+                }
+            ))
+            addView(ChromeSheet.row(
+                context = context,
+                title = "Saved passwords",
+                subtitle = "Review saved login origins and clear local password data.",
+                onClick = { showSavedPasswordsSheet() }
+            ))
+            addView(ChromeSheet.row(
+                context = context,
+                title = "JavaScript",
+                subtitle = "Most sites need this; turning it off is a strict privacy mode.",
+                trailing = preferenceSwitch(browserPreferences.javascriptEnabled) { checked ->
+                    browserPreferences.javascriptEnabled = checked
+                    onPreferencesChanged()
+                }
+            ))
+            addView(ChromeSheet.row(
+                context = context,
                 title = "Private browsing",
-                subtitle = "Private tabs close automatically when the app exits.",
+                subtitle = "Private tabs close on exit and block screenshots while active.",
                 trailing = ChromeSheet.statusPill(context, "On", true)
             ))
             addView(ChromeSheet.row(
@@ -461,10 +638,105 @@ class SettingsDialogController(
             ))
             addView(ChromeSheet.row(
                 context = context,
+                title = "Site permissions",
+                subtitle = "Review location, notification, storage, and autoplay decisions.",
+                onClick = { showSitePermissionsSheet() }
+            ))
+            addView(ChromeSheet.row(
+                context = context,
                 title = "Extension private access",
                 subtitle = "Manage which extensions can run in private tabs.",
                 onClick = { showExtensionsSheet() }
             ))
+        }
+    }
+
+    private fun showSitePermissionsSheet() {
+        ChromeSheet.show(
+            context = context,
+            title = "Site permissions",
+            subtitle = "Saved permission decisions."
+        ) {
+            val container = this
+            addView(ChromeSheet.note(context, "Loading saved site permissions..."))
+            runtime.storageController.allPermissions.accept({ permissions ->
+                container.removeAllViews()
+                if (permissions.isNullOrEmpty()) {
+                    container.addView(ChromeSheet.note(context, "No saved site permissions."))
+                } else {
+                    permissions.forEach { permission ->
+                        container.addView(ChromeSheet.row(
+                            context = context,
+                            title = contentPermissionName(permission.permission),
+                            subtitle = "${permission.uri} - ${permissionValueName(permission.value)}",
+                            trailing = ChromeSheet.actionButton(context, "Reset") {
+                                runtime.storageController.setPermission(
+                                    permission,
+                                    GeckoSession.PermissionDelegate.ContentPermission.VALUE_PROMPT
+                                )
+                                Toast.makeText(context, "Permission reset", Toast.LENGTH_SHORT).show()
+                            }
+                        ))
+                    }
+                }
+            }, {
+                container.removeAllViews()
+                container.addView(ChromeSheet.note(context, "Could not load site permissions."))
+            })
+        }
+    }
+
+    private fun contentPermissionName(permission: Int): String {
+        return when (permission) {
+            GeckoSession.PermissionDelegate.PERMISSION_GEOLOCATION -> "Location"
+            GeckoSession.PermissionDelegate.PERMISSION_DESKTOP_NOTIFICATION -> "Notifications"
+            GeckoSession.PermissionDelegate.PERMISSION_PERSISTENT_STORAGE -> "Persistent storage"
+            GeckoSession.PermissionDelegate.PERMISSION_AUTOPLAY_AUDIBLE -> "Audible autoplay"
+            GeckoSession.PermissionDelegate.PERMISSION_AUTOPLAY_INAUDIBLE -> "Inaudible autoplay"
+            GeckoSession.PermissionDelegate.PERMISSION_STORAGE_ACCESS -> "Storage access"
+            GeckoSession.PermissionDelegate.PERMISSION_LOCAL_NETWORK_ACCESS -> "Local network"
+            else -> "Permission"
+        }
+    }
+
+    private fun permissionValueName(value: Int): String {
+        return when (value) {
+            GeckoSession.PermissionDelegate.ContentPermission.VALUE_ALLOW -> "Allowed"
+            GeckoSession.PermissionDelegate.ContentPermission.VALUE_DENY -> "Blocked"
+            else -> "Ask"
+        }
+    }
+
+    private fun preferenceSwitch(checked: Boolean, onChanged: (Boolean) -> Unit): Switch {
+        return Switch(context).apply {
+            minWidth = ChromeSheet.dp(context, 56)
+            isChecked = checked
+            setOnCheckedChangeListener { _, value -> onChanged(value) }
+        }
+    }
+
+    private fun showSavedPasswordsSheet() {
+        ChromeSheet.show(
+            context = context,
+            title = "Saved passwords",
+            subtitle = "Usernames only; passwords are never shown here."
+        ) {
+            val logins = loginStore.summaries()
+            if (logins.isEmpty()) {
+                addView(ChromeSheet.note(context, "Saved logins will appear here after you approve a save prompt."))
+            } else {
+                logins.forEach { login ->
+                    addView(ChromeSheet.row(
+                        context = context,
+                        title = login.username,
+                        subtitle = login.origin
+                    ))
+                }
+                addView(ChromeSheet.actionButton(context, "Clear saved passwords", danger = true) {
+                    loginStore.clear()
+                    Toast.makeText(context, "Saved passwords cleared", Toast.LENGTH_SHORT).show()
+                })
+            }
         }
     }
 
