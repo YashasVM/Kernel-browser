@@ -222,7 +222,7 @@ class MainActivity : Activity() {
             }
         }
         binding.homeButton.setOnClickListener {
-            tabs.activeTab?.session?.loadUri(getString(R.string.home_url))
+            tabs.activeTab?.session?.loadUri(browserPreferences.homepageUrl)
         }
         binding.tabsButton.setOnClickListener {
             setChromeVisible(true)
@@ -237,16 +237,8 @@ class MainActivity : Activity() {
             ).show()
         }
         binding.settingsButton.setOnClickListener {
-            SettingsDialogController(
-                context = this,
-                runtime = runtime,
-                extensionPreferences = extensionPreferences,
-                extensionInstaller = extensionInstaller,
-                resetBrowserState = ::resetBrowserState,
-                historyProvider = { historyStore.entries() },
-                openHistoryEntry = ::openHistoryEntry,
-                clearHistory = { historyStore.clear() }
-            ).show()
+            setChromeVisible(true)
+            showBrowserMenu()
         }
         binding.geckoView.setOnTouchListener { _, event ->
             if (event.action == MotionEvent.ACTION_DOWN && chromeHidden) {
