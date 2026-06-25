@@ -35,7 +35,9 @@ class TabSwitcherDialogController(
     private val thumbnailProvider: (BrowserTab) -> Bitmap?,
     private val selectTab: (BrowserTab) -> Unit,
     private val createTab: (TabMode) -> Unit,
-    private val closeTab: (BrowserTab) -> Unit
+    private val closeTab: (BrowserTab) -> Unit,
+    private val closeTabs: (TabMode) -> Unit,
+    private val undoCloseTab: () -> Unit
 ) {
     private val motionInterpolator = PathInterpolator(0.2f, 0f, 0f, 1f)
     private var mode = tabs.activeTab?.mode ?: TabMode.NORMAL
@@ -212,10 +214,46 @@ class TabSwitcherDialogController(
                 marginEnd = ChromeSheet.dp(context, 12)
             })
 
-            addView(iconButton(R.drawable.ic_settings, "Tab options", onClick = {
-                mode = if (mode == TabMode.NORMAL) TabMode.PRIVATE else TabMode.NORMAL
-                renderTabs(dialog)
-            }))
+            addView(iconButton(R.drawable.ic_settings, "Tab options", onClick = { showTabOptions(dialog) }))
+        }
+    }
+
+    private fun showTabOptions(dialog: Dialog) {
+        ChromeSheet.show(
+            context = context,
+            title = "Tab options",
+            subtitle = if (mode == TabMode.PRIVATE) "Private tabs" else "Normal tabs"
+        ) { optionsDialog ->
+            addView(ChromeSheet.row(
+                context = context,
+                title = if (mode == TabMode.PRIVATE) "Close private tabs" else "Close normal tabs",
+                subtitle = "Close every tab in the current group.",
+                onClick = {
+                    optionsDialog.dismiss()
+                    dialog.dismiss()
+                    closeTabs(mode)
+                }
+            ))
+            addView(ChromeSheet.row(
+                context = context,
+                title = "Undo close tab",
+                subtitle = "Restore the last closed normal tab.",
+                onClick = {
+                    optionsDialog.dismiss()
+                    dialog.dismiss()
+                    undoCloseTab()
+                }
+            ))
+            addView(ChromeSheet.row(
+                context = context,
+                title = if (mode == TabMode.NORMAL) "Show private tabs" else "Show normal tabs",
+                subtitle = "Switch the tab group view.",
+                onClick = {
+                    optionsDialog.dismiss()
+                    mode = if (mode == TabMode.NORMAL) TabMode.PRIVATE else TabMode.NORMAL
+                    renderTabs(dialog)
+                }
+            ))
         }
     }
 
