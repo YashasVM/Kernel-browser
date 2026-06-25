@@ -4,8 +4,13 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.Build
+import android.os.Environment
+import android.app.AlertDialog
+import android.app.DownloadManager
 import android.graphics.Bitmap
 import android.content.res.ColorStateList
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -18,12 +23,18 @@ import android.view.inputmethod.InputMethodManager
 import android.text.Editable
 import android.text.TextWatcher
 import android.content.Context
+import android.content.Intent
 import android.app.Activity
+import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.net.Uri
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.EditText
+import android.widget.Switch
+import android.widget.Toast
 import com.kernel.browser.databinding.ActivityMainBinding
 import com.kernel.browser.extensions.ExtensionActionRegistry
 import com.kernel.browser.extensions.ExtensionInstaller
@@ -32,9 +43,13 @@ import com.kernel.browser.tabs.BrowserTab
 import com.kernel.browser.tabs.BrowserTabs
 import com.kernel.browser.tabs.TabMode
 import org.mozilla.geckoview.AllowOrDeny
+import org.mozilla.geckoview.Autocomplete
+import org.mozilla.geckoview.ContentBlocking
 import org.mozilla.geckoview.GeckoResult
 import org.mozilla.geckoview.GeckoRuntime
 import org.mozilla.geckoview.GeckoSession
+import org.mozilla.geckoview.GeckoSessionSettings
+import org.mozilla.geckoview.WebResponse
 import org.json.JSONArray
 import java.net.HttpURLConnection
 import java.net.URL
@@ -48,6 +63,11 @@ class MainActivity : Activity() {
     private lateinit var extensionInstaller: ExtensionInstaller
     private lateinit var extensionActionRegistry: ExtensionActionRegistry
     private lateinit var historyStore: BrowserHistoryStore
+    private lateinit var bookmarksStore: BookmarksStore
+    private lateinit var downloadStore: DownloadStore
+    private lateinit var loginStore: LoginStore
+    private lateinit var sessionStore: SessionStore
+    private lateinit var browserPreferences: BrowserPreferences
     private val tabThumbnails = mutableMapOf<Long, Bitmap>()
     private var bottomInset = 0
     private var chromeHidden = false
@@ -58,12 +78,21 @@ class MainActivity : Activity() {
     private val chromeHandler = Handler(Looper.getMainLooper())
     private val chromeInterpolator = PathInterpolator(0.2f, 0f, 0f, 1f)
     private val hideChromeRunnable = Runnable { setChromeVisible(false, auto = true) }
+    private var pendingAndroidPermissionCallback: GeckoSession.PermissionDelegate.Callback? = null
+    private var pendingFilePrompt: GeckoSession.PromptDelegate.FilePrompt? = null
+    private var pendingFileResult: GeckoResult<GeckoSession.PromptDelegate.PromptResponse>? = null
+    private var lastClosedNormalTab: ClosedTab? = null
 
     private data class AddressSuggestion(
         val title: String,
         val subtitle: String,
         val value: String,
         val kind: SuggestionKind
+    )
+
+    private data class ClosedTab(
+        val title: String,
+        val url: String
     )
 
     private enum class SuggestionKind {
@@ -78,8 +107,15 @@ class MainActivity : Activity() {
         setContentView(binding.root)
         configureSystemBars()
 
+        browserPreferences = BrowserPreferences(this)
         historyStore = BrowserHistoryStore(this)
+        bookmarksStore = BookmarksStore(this)
+        downloadStore = DownloadStore(this)
+        loginStore = LoginStore(this)
+        sessionStore = SessionStore(this)
         runtime = BrowserRuntime.get(this)
+        runtime.autocompleteStorageDelegate = loginStore
+        applyRuntimePreferences()
         extensionPreferences = ExtensionPreferences(this)
         extensionActionRegistry = ExtensionActionRegistry(this, runtime) {
             runOnUiThread { updateUi() }
@@ -88,17 +124,27 @@ class MainActivity : Activity() {
         extensionInstaller.syncAllowlist()
 
         tabs = BrowserTabs(runtime, ::configureSession)
-        val firstTab = tabs.create(TabMode.NORMAL)
-        attachTab(firstTab)
-        firstTab.session.loadUri(getString(R.string.home_url))
+        restoreTabsOrCreateHome(intent)
 
         configureToolbar()
         configureInsets()
         updateUi()
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        openIntentUri(intent)
+    }
+
+    override fun onPause() {
+        saveNormalSession()
+        super.onPause()
+    }
+
     override fun onDestroy() {
         if (isFinishing) {
+            saveNormalSession()
             tabs.closePrivateTabs()
         }
         super.onDestroy()
@@ -111,6 +157,46 @@ class MainActivity : Activity() {
         } else {
             super.onBackPressed()
         }
+    }
+
+    private fun restoreTabsOrCreateHome(intent: Intent?) {
+        if (openIntentUri(intent)) return
+
+        val restoredTabs = sessionStore.restore().ifEmpty {
+            listOf(SessionStore.Entry("Home", browserPreferences.homepageUrl, ""))
+        }
+        restoredTabs.forEachIndexed { index, entry ->
+            val tab = tabs.create(TabMode.NORMAL)
+            tab.title = entry.title
+            tab.url = entry.url
+            if (index == restoredTabs.lastIndex) {
+                attachTab(tab)
+            }
+            if (entry.state.isNotBlank()) {
+                runCatching {
+                    tab.sessionState = entry.state
+                    val state = GeckoSession.SessionState.fromString(entry.state)
+                        ?: error("Invalid session state")
+                    tab.session.restoreState(state)
+                }.getOrElse {
+                    tab.session.loadUri(entry.url.ifBlank { browserPreferences.homepageUrl })
+                }
+            } else {
+                tab.session.loadUri(entry.url.ifBlank { browserPreferences.homepageUrl })
+            }
+        }
+    }
+
+    private fun openIntentUri(intent: Intent?): Boolean {
+        val uri = intent?.dataString?.takeIf {
+            intent.action == Intent.ACTION_VIEW && (it.startsWith("http://") || it.startsWith("https://"))
+        } ?: return false
+
+        val tab = tabs.create(TabMode.NORMAL)
+        attachTab(tab)
+        tab.session.loadUri(uri)
+        setChromeVisible(true)
+        return true
     }
 
     private fun configureToolbar() {
