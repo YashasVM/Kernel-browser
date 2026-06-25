@@ -332,6 +332,7 @@ class MainActivity : Activity() {
     }
 
     private fun configureSession(tab: BrowserTab) {
+        applyDesktopMode(tab)
         var lastScrollYPx = 0f
         tab.session.setCompositorScrollDelegate(object : GeckoSession.CompositorScrollDelegate {
             override fun onScrollChanged(
@@ -368,8 +369,122 @@ class MainActivity : Activity() {
             }
 
             override fun onCloseRequest(session: GeckoSession) {
+                rememberClosedTab(tab)
                 tabs.close(tab.id)
                 attachCurrentOrCreate()
+                saveNormalSession()
+            }
+
+            override fun onExternalResponse(session: GeckoSession, response: WebResponse) {
+                startDownload(response)
+            }
+        }
+
+        tab.session.permissionDelegate = object : GeckoSession.PermissionDelegate {
+            override fun onAndroidPermissionsRequest(
+                session: GeckoSession,
+                permissions: Array<String>?,
+                callback: GeckoSession.PermissionDelegate.Callback
+            ) {
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+                    callback.grant()
+                    return
+                }
+                pendingAndroidPermissionCallback = callback
+                requestPermissions(permissions ?: emptyArray(), REQUEST_ANDROID_PERMISSIONS)
+            }
+
+            override fun onContentPermissionRequest(
+                session: GeckoSession,
+                perm: GeckoSession.PermissionDelegate.ContentPermission
+            ): GeckoResult<Int> {
+                val result = GeckoResult<Int>()
+                val name = contentPermissionName(perm.permission)
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Allow $name?")
+                    .setMessage("${perm.uri} wants to use $name.")
+                    .setPositiveButton("Allow") { _, _ -> result.complete(GeckoSession.PermissionDelegate.ContentPermission.VALUE_ALLOW) }
+                    .setNegativeButton("Block") { _, _ -> result.complete(GeckoSession.PermissionDelegate.ContentPermission.VALUE_DENY) }
+                    .setOnCancelListener { result.complete(GeckoSession.PermissionDelegate.ContentPermission.VALUE_DENY) }
+                    .show()
+                return result
+            }
+
+            override fun onMediaPermissionRequest(
+                session: GeckoSession,
+                uri: String,
+                video: Array<GeckoSession.PermissionDelegate.MediaSource>?,
+                audio: Array<GeckoSession.PermissionDelegate.MediaSource>?,
+                callback: GeckoSession.PermissionDelegate.MediaCallback
+            ) {
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Allow camera or microphone?")
+                    .setMessage("$uri wants to use media devices.")
+                    .setPositiveButton("Allow") { _, _ ->
+                        callback.grant(video?.firstOrNull(), audio?.firstOrNull())
+                    }
+                    .setNegativeButton("Block") { _, _ -> callback.reject() }
+                    .setOnCancelListener { callback.reject() }
+                    .show()
+            }
+        }
+
+        tab.session.promptDelegate = object : GeckoSession.PromptDelegate {
+            override fun onFilePrompt(
+                session: GeckoSession,
+                prompt: GeckoSession.PromptDelegate.FilePrompt
+            ): GeckoResult<GeckoSession.PromptDelegate.PromptResponse> {
+                val result = GeckoResult<GeckoSession.PromptDelegate.PromptResponse>()
+                pendingFilePrompt = prompt
+                pendingFileResult = result
+                openFilePicker(prompt)
+                return result
+            }
+
+            override fun onLoginSave(
+                session: GeckoSession,
+                request: GeckoSession.PromptDelegate.AutocompleteRequest<Autocomplete.LoginSaveOption>
+            ): GeckoResult<GeckoSession.PromptDelegate.PromptResponse> {
+                val result = GeckoResult<GeckoSession.PromptDelegate.PromptResponse>()
+                val option = request.options.firstOrNull()
+                val login = option?.value
+                if (option == null || login == null || !browserPreferences.loginAutofill) {
+                    result.complete(request.dismiss())
+                    return result
+                }
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Save password?")
+                    .setMessage("Save login for ${login.username} on ${login.origin}?")
+                    .setPositiveButton("Save") { _, _ ->
+                        loginStore.save(login)
+                        result.complete(request.confirm(option))
+                    }
+                    .setNegativeButton("Not now") { _, _ -> result.complete(request.dismiss()) }
+                    .setOnCancelListener { result.complete(request.dismiss()) }
+                    .show()
+                return result
+            }
+
+            override fun onLoginSelect(
+                session: GeckoSession,
+                request: GeckoSession.PromptDelegate.AutocompleteRequest<Autocomplete.LoginSelectOption>
+            ): GeckoResult<GeckoSession.PromptDelegate.PromptResponse> {
+                val result = GeckoResult<GeckoSession.PromptDelegate.PromptResponse>()
+                val options = request.options
+                if (options.isEmpty() || !browserPreferences.loginAutofill) {
+                    result.complete(request.dismiss())
+                    return result
+                }
+                val labels = options.map { option ->
+                    option.value.username.ifBlank { option.value.origin }
+                }.toTypedArray()
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Use saved login?")
+                    .setItems(labels) { _, index -> result.complete(request.confirm(options[index])) }
+                    .setNegativeButton("Cancel") { _, _ -> result.complete(request.dismiss()) }
+                    .setOnCancelListener { result.complete(request.dismiss()) }
+                    .show()
+                return result
             }
         }
 
@@ -433,6 +548,7 @@ class MainActivity : Activity() {
                 tab.progress = 0
                 captureThumbnail(tab)
                 recordHistory(tab)
+                saveNormalSession()
                 updateUi()
             }
 
@@ -441,11 +557,30 @@ class MainActivity : Activity() {
                 tab.progress = progress
                 updateUi()
             }
+
+            override fun onSecurityChange(
+                session: GeckoSession,
+                securityInfo: GeckoSession.ProgressDelegate.SecurityInformation
+            ) {
+                if (session != tab.session) return
+                tab.isSecure = securityInfo.isSecure
+                tab.securityHost = securityInfo.host.orEmpty()
+                updateUi()
+            }
+
+            override fun onSessionStateChange(
+                session: GeckoSession,
+                sessionState: GeckoSession.SessionState
+            ) {
+                if (session != tab.session) return
+                tab.sessionState = sessionState.toString()
+                saveNormalSession()
+            }
         }
     }
 
     private fun loadFromAddressBar() {
-        val normalized = UrlNormalizer.normalize(binding.addressBar.text.toString())
+        val normalized = UrlNormalizer.normalize(binding.addressBar.text.toString(), browserPreferences.searchEngine)
         tabs.activeTab?.session?.loadUri(normalized)
         addressBarEditing = false
         hideAddressSuggestions()
@@ -458,8 +593,8 @@ class MainActivity : Activity() {
     private fun loadSuggestion(suggestion: AddressSuggestion) {
         val url = when (suggestion.kind) {
             SuggestionKind.HISTORY -> suggestion.value
-            SuggestionKind.NAVIGATE -> UrlNormalizer.normalize(suggestion.value)
-            SuggestionKind.SEARCH -> UrlNormalizer.normalize(suggestion.value)
+            SuggestionKind.NAVIGATE -> UrlNormalizer.normalize(suggestion.value, browserPreferences.searchEngine)
+            SuggestionKind.SEARCH -> UrlNormalizer.normalize(suggestion.value, browserPreferences.searchEngine)
         }
         binding.addressBar.setText(suggestion.value)
         binding.addressBar.setSelection(binding.addressBar.text.length)
@@ -482,7 +617,7 @@ class MainActivity : Activity() {
         val localSuggestions = localAddressSuggestions(query)
         val cachedRecommendations = searchRecommendationCache[query.lowercase()].orEmpty()
         renderAddressSuggestions((localSuggestions + cachedRecommendations.map {
-            AddressSuggestion(it, "Search Google", it, SuggestionKind.SEARCH)
+            AddressSuggestion(it, "Search ${browserPreferences.searchEngine.displayName}", it, SuggestionKind.SEARCH)
         }).distinctBy { it.kind.name + it.value }.take(4))
 
         if (query.length >= 2 && cachedRecommendations.isEmpty()) {
@@ -492,7 +627,7 @@ class MainActivity : Activity() {
 
     private fun localAddressSuggestions(query: String): List<AddressSuggestion> {
         val normalizedQuery = query.lowercase()
-        val history = historyStore.entries()
+        val history = (bookmarksStore.entries() + historyStore.entries()).distinctBy { it.second }
         val matches = if (query.isBlank()) {
             history.take(5)
         } else {
@@ -513,7 +648,7 @@ class MainActivity : Activity() {
         val primary = if (looksLikeUrl(query)) {
             AddressSuggestion(query, "Open website", query, SuggestionKind.NAVIGATE)
         } else {
-            AddressSuggestion(query, "Search Google", query, SuggestionKind.SEARCH)
+            AddressSuggestion(query, "Search ${browserPreferences.searchEngine.displayName}", query, SuggestionKind.SEARCH)
         }
 
         return listOf(primary) + matches
@@ -523,16 +658,21 @@ class MainActivity : Activity() {
         val requestId = ++suggestionRequestId
         Thread {
             val recommendations = runCatching {
-                val encoded = URLEncoder.encode(query, "UTF-8")
-                val connection = URL("https://suggestqueries.google.com/complete/search?client=firefox&q=$encoded")
-                    .openConnection() as HttpURLConnection
-                connection.connectTimeout = 1_500
-                connection.readTimeout = 1_500
-                connection.setRequestProperty("User-Agent", "KernelBrowser/${BuildConfig.VERSION_NAME}")
-                connection.inputStream.bufferedReader().use { reader ->
-                    val payload = reader.readText()
-                    val array = JSONArray(payload).getJSONArray(1)
-                    List(array.length()) { index -> array.getString(index) }
+                val suggestionsUrl = browserPreferences.searchEngine.suggestionsUrl
+                if (suggestionsUrl == null) {
+                    emptyList()
+                } else {
+                    val encoded = URLEncoder.encode(query, "UTF-8")
+                    val connection = URL(suggestionsUrl.format(encoded))
+                        .openConnection() as HttpURLConnection
+                    connection.connectTimeout = 1_500
+                    connection.readTimeout = 1_500
+                    connection.setRequestProperty("User-Agent", "KernelBrowser/${BuildConfig.VERSION_NAME}")
+                    connection.inputStream.bufferedReader().use { reader ->
+                        val payload = reader.readText()
+                        val array = JSONArray(payload).getJSONArray(1)
+                        List(array.length()) { index -> array.getString(index) }
+                    }
                 }
             }.getOrElse { emptyList() }
 
