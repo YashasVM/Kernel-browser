@@ -864,6 +864,723 @@ class MainActivity : Activity() {
         binding.geckoView.setVerticalClipping(currentClipping)
     }
 
+    private fun showBrowserMenu() {
+        val tab = tabs.activeTab
+        val url = tab?.url.orEmpty()
+        ChromeSheet.show(
+            context = this,
+            title = "Browser",
+            subtitle = tab?.title?.takeIf { it.isNotBlank() } ?: url.takeIf { it.isNotBlank() }
+        ) { dialog ->
+            addView(ChromeSheet.sectionLabel(this@MainActivity, "Page"))
+            addView(ChromeSheet.row(
+                context = this@MainActivity,
+                title = if (bookmarksStore.isBookmarked(url)) "Remove bookmark" else "Add bookmark",
+                subtitle = url.ifBlank { "Open a page to bookmark it." },
+                onClick = {
+                    dialog.dismiss()
+                    toggleBookmark()
+                }
+            ))
+            addView(ChromeSheet.row(
+                context = this@MainActivity,
+                title = "Share",
+                subtitle = "Send this page to another app.",
+                onClick = {
+                    dialog.dismiss()
+                    shareCurrentPage()
+                }
+            ))
+            addView(ChromeSheet.row(
+                context = this@MainActivity,
+                title = "Copy link",
+                subtitle = "Copy the current URL.",
+                onClick = {
+                    dialog.dismiss()
+                    copyCurrentLink()
+                }
+            ))
+            addView(ChromeSheet.row(
+                context = this@MainActivity,
+                title = "Find in page",
+                subtitle = "Search text on the current page.",
+                onClick = {
+                    dialog.dismiss()
+                    showFindSheet()
+                }
+            ))
+            addView(ChromeSheet.row(
+                context = this@MainActivity,
+                title = "Reader view",
+                subtitle = "Open this page with Gecko's reader view when available.",
+                onClick = {
+                    dialog.dismiss()
+                    openReaderView()
+                }
+            ))
+            addView(ChromeSheet.row(
+                context = this@MainActivity,
+                title = "Site info",
+                subtitle = securitySummary(tab),
+                onClick = {
+                    dialog.dismiss()
+                    showSiteInfo()
+                }
+            ))
+            addView(ChromeSheet.row(
+                context = this@MainActivity,
+                title = "Page zoom",
+                subtitle = "${browserPreferences.pageZoomPercent}%",
+                onClick = {
+                    dialog.dismiss()
+                    showPageZoomSheet()
+                }
+            ))
+
+            addView(ChromeSheet.sectionLabel(this@MainActivity, "Library"))
+            addView(ChromeSheet.row(
+                context = this@MainActivity,
+                title = "Bookmarks",
+                subtitle = "${bookmarksStore.entries().size} saved",
+                onClick = {
+                    dialog.dismiss()
+                    showBookmarksSheet()
+                }
+            ))
+            addView(ChromeSheet.row(
+                context = this@MainActivity,
+                title = "Downloads",
+                subtitle = "${downloadStore.entries().size} recent",
+                onClick = {
+                    dialog.dismiss()
+                    showDownloadsSheet()
+                }
+            ))
+            addView(ChromeSheet.sectionLabel(this@MainActivity, "Tabs"))
+            addView(ChromeSheet.row(
+                context = this@MainActivity,
+                title = "Undo close tab",
+                subtitle = lastClosedNormalTab?.title?.ifBlank { lastClosedNormalTab?.url }.orEmpty().ifBlank { "No normal tab to restore." },
+                onClick = {
+                    dialog.dismiss()
+                    undoCloseTab()
+                }
+            ))
+            addView(ChromeSheet.row(
+                context = this@MainActivity,
+                title = "Close normal tabs",
+                subtitle = "Close all normal tabs and return to the homepage.",
+                onClick = {
+                    dialog.dismiss()
+                    closeNormalTabs()
+                }
+            ))
+            addView(ChromeSheet.sectionLabel(this@MainActivity, "Privacy"))
+            addView(ChromeSheet.row(
+                context = this@MainActivity,
+                title = "Desktop site",
+                subtitle = if (browserPreferences.desktopMode) "Desktop user agent and viewport are on." else "Mobile site mode is on.",
+                trailing = Switch(this@MainActivity).apply {
+                    minWidth = ChromeSheet.dp(this@MainActivity, 56)
+                    isChecked = browserPreferences.desktopMode
+                    setOnCheckedChangeListener { _, checked ->
+                        browserPreferences.desktopMode = checked
+                        applyDesktopModeToAllTabs(reloadActive = true)
+                    }
+                }
+            ))
+            addView(ChromeSheet.row(
+                context = this@MainActivity,
+                title = "Tracking protection",
+                subtitle = if (browserPreferences.trackingProtection) "Trackers, cryptominers, and fingerprinting are blocked." else "Tracking protection is off.",
+                trailing = Switch(this@MainActivity).apply {
+                    minWidth = ChromeSheet.dp(this@MainActivity, 56)
+                    isChecked = browserPreferences.trackingProtection
+                    setOnCheckedChangeListener { _, checked ->
+                        browserPreferences.trackingProtection = checked
+                        applyRuntimePreferences()
+                        applyDesktopModeToAllTabs(reloadActive = true)
+                    }
+                }
+            ))
+            addView(ChromeSheet.sectionLabel(this@MainActivity, "Settings"))
+            addView(ChromeSheet.row(
+                context = this@MainActivity,
+                title = "Settings",
+                subtitle = "Search, homepage, privacy, history, and extensions.",
+                onClick = {
+                    dialog.dismiss()
+                    showSettings()
+                }
+            ))
+        }
+    }
+
+    private fun showSettings() {
+        SettingsDialogController(
+            context = this,
+            runtime = runtime,
+            extensionPreferences = extensionPreferences,
+            extensionInstaller = extensionInstaller,
+            browserPreferences = browserPreferences,
+            bookmarksStore = bookmarksStore,
+            downloadStore = downloadStore,
+            loginStore = loginStore,
+            downloadStatus = ::downloadStatus,
+            openDownload = ::openDownload,
+            removeDownload = ::removeDownload,
+            resetBrowserState = ::resetBrowserState,
+            historyProvider = { historyStore.entries() },
+            openHistoryEntry = ::openHistoryEntry,
+            clearHistory = { historyStore.clear() },
+            onPreferencesChanged = {
+                searchRecommendationCache.clear()
+                applyRuntimePreferences()
+                applyDesktopModeToAllTabs(reloadActive = false)
+                updateUi()
+            }
+        ).show()
+    }
+
+    private fun toggleBookmark() {
+        val tab = tabs.activeTab ?: return
+        if (tab.url.isBlank()) return
+        val saved = bookmarksStore.toggle(tab.title, tab.url)
+        Toast.makeText(this, if (saved) "Bookmark added" else "Bookmark removed", Toast.LENGTH_SHORT).show()
+        updateUi()
+    }
+
+    private fun showBookmarksSheet() {
+        ChromeSheet.show(
+            context = this,
+            title = "Bookmarks",
+            subtitle = "Saved pages"
+        ) { dialog ->
+            val bookmarks = bookmarksStore.entries()
+            if (bookmarks.isEmpty()) {
+                addView(ChromeSheet.note(this@MainActivity, "Bookmarked pages will appear here."))
+            } else {
+                bookmarks.forEach { (title, url) ->
+                    addView(ChromeSheet.row(
+                        context = this@MainActivity,
+                        title = title,
+                        subtitle = url,
+                        onClick = {
+                            dialog.dismiss()
+                            tabs.activeTab?.session?.loadUri(url)
+                            setChromeVisible(true)
+                        }
+                    ))
+                }
+                addView(ChromeSheet.actionButton(this@MainActivity, "Clear bookmarks", danger = true) {
+                    bookmarksStore.clear()
+                    dialog.dismiss()
+                    Toast.makeText(this@MainActivity, "Bookmarks cleared", Toast.LENGTH_SHORT).show()
+                })
+            }
+        }
+    }
+
+    private fun showDownloadsSheet() {
+        ChromeSheet.show(
+            context = this,
+            title = "Downloads",
+            subtitle = "Recent files sent to Android downloads"
+        ) { dialog ->
+            val downloads = downloadStore.entries()
+            if (downloads.isEmpty()) {
+                addView(ChromeSheet.note(this@MainActivity, "Files you download will appear here after they start."))
+            } else {
+                downloads.forEach { entry ->
+                    addView(ChromeSheet.row(
+                        context = this@MainActivity,
+                        title = entry.title,
+                        subtitle = "${downloadStatus(entry)} - ${entry.url}",
+                        onClick = { showDownloadActions(entry) }
+                    ))
+                }
+            }
+            addView(actionRow(
+                ChromeSheet.actionButton(this@MainActivity, "Open Downloads") {
+                    openSystemDownloads()
+                },
+                ChromeSheet.actionButton(this@MainActivity, "Clear", danger = true) {
+                    downloadStore.clear()
+                    dialog.dismiss()
+                    Toast.makeText(this@MainActivity, "Download history cleared", Toast.LENGTH_SHORT).show()
+                }
+            ))
+        }
+    }
+
+    private fun showDownloadActions(entry: DownloadStore.Entry) {
+        ChromeSheet.show(
+            context = this,
+            title = entry.title,
+            subtitle = downloadStatus(entry),
+            scrollable = false
+        ) { dialog ->
+            addView(actionRow(
+                ChromeSheet.actionButton(this@MainActivity, "Open", primary = true) {
+                    dialog.dismiss()
+                    openDownload(entry)
+                },
+                ChromeSheet.actionButton(this@MainActivity, "Remove", danger = true) {
+                    dialog.dismiss()
+                    removeDownload(entry)
+                }
+            ))
+            addView(ChromeSheet.actionButton(this@MainActivity, "Copy source") {
+                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                clipboard.setPrimaryClip(ClipData.newPlainText("Download source", entry.url))
+                Toast.makeText(this@MainActivity, "Source copied", Toast.LENGTH_SHORT).show()
+            })
+        }
+    }
+
+    private fun openDownload(entry: DownloadStore.Entry) {
+        val downloadManager = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+        if (entry.id >= 0) {
+            val uri = downloadManager.getUriForDownloadedFile(entry.id)
+            val mimeType = downloadManager.getMimeTypeForDownloadedFile(entry.id) ?: "*/*"
+            if (uri != null) {
+                val intent = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, mimeType)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                runCatching { startActivity(intent) }.getOrElse {
+                    Toast.makeText(this, "Could not open download", Toast.LENGTH_SHORT).show()
+                }
+                return
+            }
+        }
+        openSystemDownloads()
+    }
+
+    private fun removeDownload(entry: DownloadStore.Entry) {
+        if (entry.id >= 0) {
+            val downloadManager = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+            runCatching { downloadManager.remove(entry.id) }
+        }
+        downloadStore.remove(entry.id)
+        Toast.makeText(this, "Download removed", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun downloadStatus(entry: DownloadStore.Entry): String {
+        if (entry.id < 0) return "Recorded"
+        val downloadManager = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+        val cursor = downloadManager.query(DownloadManager.Query().setFilterById(entry.id)) ?: return "Unknown"
+        cursor.use {
+            if (!it.moveToFirst()) return "Missing"
+            val statusIndex = it.getColumnIndex(DownloadManager.COLUMN_STATUS)
+            val reasonIndex = it.getColumnIndex(DownloadManager.COLUMN_REASON)
+            val status = if (statusIndex >= 0) it.getInt(statusIndex) else return "Unknown"
+            val reason = if (reasonIndex >= 0) it.getInt(reasonIndex) else 0
+            return when (status) {
+                DownloadManager.STATUS_PENDING -> "Pending"
+                DownloadManager.STATUS_RUNNING -> "Downloading"
+                DownloadManager.STATUS_PAUSED -> "Paused ($reason)"
+                DownloadManager.STATUS_SUCCESSFUL -> "Downloaded"
+                DownloadManager.STATUS_FAILED -> "Failed ($reason)"
+                else -> "Unknown"
+            }
+        }
+    }
+
+    private fun undoCloseTab() {
+        val closed = lastClosedNormalTab
+        if (closed?.url.isNullOrBlank()) {
+            Toast.makeText(this, "No normal tab to restore", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val tab = tabs.create(TabMode.NORMAL)
+        attachTab(tab)
+        tab.title = closed.title
+        tab.session.loadUri(closed.url)
+        lastClosedNormalTab = null
+        setChromeVisible(true)
+    }
+
+    private fun closeNormalTabs() {
+        closeTabs(TabMode.NORMAL)
+    }
+
+    private fun closeTabs(mode: TabMode) {
+        tabs.all().filter { it.mode == mode }.forEach { tab ->
+            rememberClosedTab(tab)
+            tabThumbnails.remove(tab.id)
+            tabs.close(tab.id)
+        }
+        if (mode == TabMode.NORMAL) {
+            sessionStore.clear()
+        }
+        val active = tabs.activeTab ?: tabs.create(TabMode.NORMAL).also {
+            it.session.loadUri(browserPreferences.homepageUrl)
+        }
+        attachTab(active)
+        if (active.url.isBlank()) {
+            active.session.loadUri(browserPreferences.homepageUrl)
+        }
+        saveNormalSession()
+        updateUi()
+        Toast.makeText(
+            this,
+            if (mode == TabMode.PRIVATE) "Private tabs closed" else "Normal tabs closed",
+            Toast.LENGTH_SHORT
+        ).show()
+    }
+
+    private fun rememberClosedTab(tab: BrowserTab) {
+        if (!tab.isPrivate && tab.url.isNotBlank()) {
+            lastClosedNormalTab = ClosedTab(tab.title.ifBlank { tab.url }, tab.url)
+        }
+    }
+
+    private fun openSystemDownloads() {
+        val intent = Intent(DownloadManager.ACTION_VIEW_DOWNLOADS)
+        runCatching { startActivity(intent) }.getOrElse {
+            Toast.makeText(this, "Could not open Downloads", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun shareCurrentPage() {
+        val tab = tabs.activeTab ?: return
+        val text = listOf(tab.title, tab.url).filter { it.isNotBlank() }.joinToString("\n")
+        if (text.isBlank()) return
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_SUBJECT, tab.title)
+            putExtra(Intent.EXTRA_TEXT, text)
+        }
+        startActivity(Intent.createChooser(intent, "Share page"))
+    }
+
+    private fun openReaderView() {
+        val url = tabs.activeTab?.url.orEmpty()
+        if (!url.startsWith("http://") && !url.startsWith("https://")) {
+            Toast.makeText(this, "Reader view needs a web page", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val encoded = URLEncoder.encode(url, "UTF-8")
+        tabs.activeTab?.session?.loadUri("about:reader?url=$encoded")
+        setChromeVisible(true)
+    }
+
+    private fun copyCurrentLink() {
+        val url = tabs.activeTab?.url.orEmpty()
+        if (url.isBlank()) return
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("Page link", url))
+        Toast.makeText(this, "Link copied", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun showFindSheet() {
+        val input = EditText(this).apply {
+            hint = "Find text"
+            setSingleLine(true)
+            setTextColor(getColor(R.color.kernel_text))
+            setHintTextColor(getColor(R.color.kernel_muted))
+        }
+        ChromeSheet.show(
+            context = this,
+            title = "Find in page",
+            subtitle = "Search the current page",
+            scrollable = false
+        ) { dialog ->
+            addView(input, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ChromeSheet.dp(this@MainActivity, 52)
+            ).apply {
+                bottomMargin = ChromeSheet.dp(this@MainActivity, 10)
+            })
+            addView(actionRow(
+                ChromeSheet.actionButton(this@MainActivity, "Previous") {
+                    findInPage(input.text.toString(), backwards = true)
+                },
+                ChromeSheet.actionButton(this@MainActivity, "Next", primary = true) {
+                    findInPage(input.text.toString(), backwards = false)
+                }
+            ))
+            addView(ChromeSheet.actionButton(this@MainActivity, "Clear") {
+                tabs.activeTab?.session?.finder?.clear()
+                dialog.dismiss()
+            })
+        }
+        input.requestFocus()
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+        imm.showSoftInput(input, InputMethodManager.SHOW_IMPLICIT)
+    }
+
+    private fun findInPage(query: String, backwards: Boolean) {
+        if (query.isBlank()) return
+        val finder = tabs.activeTab?.session?.finder ?: return
+        finder.displayFlags = GeckoSession.FINDER_DISPLAY_HIGHLIGHT_ALL
+        val flags = if (backwards) GeckoSession.FINDER_FIND_BACKWARDS else GeckoSession.FINDER_FIND_FORWARD
+        finder.find(query, flags)
+    }
+
+    private fun showPageZoomSheet() {
+        ChromeSheet.show(
+            context = this,
+            title = "Page zoom",
+            subtitle = "Change page text size across tabs",
+            scrollable = false
+        ) {
+            addView(ChromeSheet.row(
+                context = this@MainActivity,
+                title = "Current zoom",
+                subtitle = "${browserPreferences.pageZoomPercent}%",
+                trailing = ChromeSheet.statusPill(this@MainActivity, "${browserPreferences.pageZoomPercent}%", true)
+            ))
+            addView(actionRow(
+                ChromeSheet.actionButton(this@MainActivity, "-") {
+                    browserPreferences.pageZoomPercent -= 10
+                    applyRuntimePreferences()
+                    Toast.makeText(this@MainActivity, "Zoom ${browserPreferences.pageZoomPercent}%", Toast.LENGTH_SHORT).show()
+                },
+                ChromeSheet.actionButton(this@MainActivity, "+", primary = true) {
+                    browserPreferences.pageZoomPercent += 10
+                    applyRuntimePreferences()
+                    Toast.makeText(this@MainActivity, "Zoom ${browserPreferences.pageZoomPercent}%", Toast.LENGTH_SHORT).show()
+                }
+            ))
+            addView(ChromeSheet.actionButton(this@MainActivity, "Reset") {
+                browserPreferences.pageZoomPercent = 100
+                applyRuntimePreferences()
+                Toast.makeText(this@MainActivity, "Zoom reset", Toast.LENGTH_SHORT).show()
+            })
+        }
+    }
+
+    private fun showSiteInfo() {
+        val tab = tabs.activeTab
+        ChromeSheet.show(
+            context = this,
+            title = "Site info",
+            subtitle = tab?.securityHost?.ifBlank { tab.url }.orEmpty()
+        ) {
+            addView(ChromeSheet.row(
+                context = this@MainActivity,
+                title = if (tab?.isSecure == true) "Connection secure" else "Connection not verified",
+                subtitle = tab?.url.orEmpty(),
+                trailing = ChromeSheet.statusPill(this@MainActivity, if (tab?.isSecure == true) "HTTPS" else "Info", tab?.isSecure == true)
+            ))
+            addView(ChromeSheet.row(
+                context = this@MainActivity,
+                title = "Clear site data",
+                subtitle = "Clear cookies, cache, permissions, and storage for this site.",
+                onClick = { clearCurrentSiteData() }
+            ))
+        }
+    }
+
+    private fun clearCurrentSiteData() {
+        val host = currentHost()
+        if (host.isNullOrBlank()) {
+            Toast.makeText(this, "No site data to clear", Toast.LENGTH_SHORT).show()
+            return
+        }
+        runtime.storageController.clearDataFromBaseDomain(host, org.mozilla.geckoview.StorageController.ClearFlags.ALL).accept(
+            { Toast.makeText(this, "Site data cleared for $host", Toast.LENGTH_SHORT).show() },
+            {
+                SafeLog.warning("Clearing site data failed", it)
+                Toast.makeText(this, "Could not clear site data", Toast.LENGTH_SHORT).show()
+            }
+        )
+    }
+
+    private fun currentHost(): String? {
+        val tab = tabs.activeTab ?: return null
+        return tab.securityHost.ifBlank {
+            runCatching { Uri.parse(tab.url).host.orEmpty() }.getOrDefault("")
+        }.takeIf { it.isNotBlank() }
+    }
+
+    private fun securitySummary(tab: BrowserTab?): String {
+        return when {
+            tab?.isSecure == true -> "Secure connection to ${tab.securityHost.ifBlank { "this site" }}."
+            tab?.url?.startsWith("https://") == true -> "HTTPS loaded; certificate state is pending."
+            tab?.url.isNullOrBlank() -> "No page loaded."
+            else -> "Connection is not HTTPS."
+        }
+    }
+
+    private fun applyDesktopModeToAllTabs(reloadActive: Boolean) {
+        tabs.all().forEach(::applyDesktopMode)
+        if (reloadActive) {
+            tabs.activeTab?.session?.reload()
+        }
+        updateUi()
+    }
+
+    private fun applyRuntimePreferences() {
+        runtime.settings
+            .setFontSizeFactor(browserPreferences.pageZoomPercent / 100f)
+            .setLoginAutofillEnabled(browserPreferences.loginAutofill)
+            .setJavaScriptEnabled(browserPreferences.javascriptEnabled)
+            .setGlobalPrivacyControl(browserPreferences.trackingProtection)
+            .setFingerprintingProtection(browserPreferences.trackingProtection)
+        runtime.settings.contentBlocking
+            .setAntiTracking(if (browserPreferences.trackingProtection) ContentBlocking.AntiTracking.DEFAULT else ContentBlocking.AntiTracking.NONE)
+            .setSafeBrowsing(ContentBlocking.SafeBrowsing.DEFAULT)
+            .setCookieBehavior(
+                if (browserPreferences.blockThirdPartyCookies) {
+                    ContentBlocking.CookieBehavior.ACCEPT_FIRST_PARTY_AND_ISOLATE_OTHERS
+                } else {
+                    ContentBlocking.CookieBehavior.ACCEPT_ALL
+                }
+            )
+            .setCookieBehaviorPrivateMode(ContentBlocking.CookieBehavior.ACCEPT_FIRST_PARTY_AND_ISOLATE_OTHERS)
+            .setCookiePurging(browserPreferences.trackingProtection)
+            .setEnhancedTrackingProtectionLevel(
+                if (browserPreferences.trackingProtection) {
+                    ContentBlocking.EtpLevel.DEFAULT
+                } else {
+                    ContentBlocking.EtpLevel.NONE
+                }
+            )
+    }
+
+    private fun applyDesktopMode(tab: BrowserTab) {
+        val settings = tab.session.settings
+        settings.useTrackingProtection = browserPreferences.trackingProtection
+        settings.allowJavascript = browserPreferences.javascriptEnabled
+        if (browserPreferences.desktopMode) {
+            settings.userAgentMode = GeckoSessionSettings.USER_AGENT_MODE_DESKTOP
+            settings.viewportMode = GeckoSessionSettings.VIEWPORT_MODE_DESKTOP
+        } else {
+            settings.userAgentMode = GeckoSessionSettings.USER_AGENT_MODE_MOBILE
+            settings.viewportMode = GeckoSessionSettings.VIEWPORT_MODE_MOBILE
+        }
+    }
+
+    private fun startDownload(response: WebResponse) {
+        val uri = response.uri.takeIf { it.isNotBlank() } ?: return
+        runCatching {
+            val parsedUri = Uri.parse(uri)
+            val filename = parsedUri.lastPathSegment
+                ?.substringAfterLast('/')
+                ?.takeIf { it.isNotBlank() }
+                ?: "kernel-download"
+            val request = DownloadManager.Request(parsedUri)
+                .setTitle(filename)
+                .setDescription(uri)
+                .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, filename)
+                .setAllowedOverMetered(true)
+                .setAllowedOverRoaming(true)
+            val downloadManager = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+            val id = downloadManager.enqueue(request)
+            downloadStore.record(id, filename, uri, filename)
+            Toast.makeText(this, "Download started", Toast.LENGTH_SHORT).show()
+        }.getOrElse {
+            SafeLog.warning("Download failed", it)
+            Toast.makeText(this, "Could not start download", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun openFilePicker(prompt: GeckoSession.PromptDelegate.FilePrompt) {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = prompt.mimeTypes?.firstOrNull()?.takeIf { it.isNotBlank() } ?: "*/*"
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+        }
+        runCatching {
+            startActivityForResult(Intent.createChooser(intent, "Choose file"), REQUEST_FILE_PICKER)
+        }.getOrElse {
+            pendingFileResult?.complete(prompt.dismiss())
+            pendingFilePrompt = null
+            pendingFileResult = null
+            Toast.makeText(this, "No file picker available", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (requestCode == REQUEST_FILE_PICKER) {
+            val prompt = pendingFilePrompt
+            val result = pendingFileResult
+            pendingFilePrompt = null
+            pendingFileResult = null
+            if (prompt != null && result != null) {
+                if (resultCode == RESULT_OK && data != null) {
+                    val uris = selectedUris(data)
+                    val response = when (uris.size) {
+                        0 -> prompt.dismiss()
+                        1 -> prompt.confirm(this, uris.first())
+                        else -> prompt.confirm(this, uris.toTypedArray())
+                    }
+                    result.complete(response)
+                } else {
+                    result.complete(prompt.dismiss())
+                }
+            }
+            return
+        }
+        super.onActivityResult(requestCode, resultCode, data)
+    }
+
+    private fun selectedUris(data: Intent): List<Uri> {
+        val clipData = data.clipData
+        if (clipData != null) {
+            return List(clipData.itemCount) { index -> clipData.getItemAt(index).uri }
+        }
+        return data.data?.let { listOf(it) }.orEmpty()
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        if (requestCode == REQUEST_ANDROID_PERMISSIONS) {
+            val callback = pendingAndroidPermissionCallback
+            pendingAndroidPermissionCallback = null
+            if (grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
+                callback?.grant()
+            } else {
+                callback?.reject()
+            }
+            return
+        }
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+    }
+
+    private fun contentPermissionName(permission: Int): String {
+        return when (permission) {
+            GeckoSession.PermissionDelegate.PERMISSION_GEOLOCATION -> "location"
+            GeckoSession.PermissionDelegate.PERMISSION_DESKTOP_NOTIFICATION -> "notifications"
+            GeckoSession.PermissionDelegate.PERMISSION_PERSISTENT_STORAGE -> "persistent storage"
+            GeckoSession.PermissionDelegate.PERMISSION_AUTOPLAY_AUDIBLE -> "audible autoplay"
+            GeckoSession.PermissionDelegate.PERMISSION_AUTOPLAY_INAUDIBLE -> "inaudible autoplay"
+            GeckoSession.PermissionDelegate.PERMISSION_STORAGE_ACCESS -> "storage access"
+            GeckoSession.PermissionDelegate.PERMISSION_LOCAL_NETWORK_ACCESS -> "local network access"
+            else -> "this permission"
+        }
+    }
+
+    private fun saveNormalSession() {
+        sessionStore.save(tabs.all().filterNot { it.isPrivate }.map { tab ->
+            SessionStore.Entry(
+                title = tab.title,
+                url = tab.url,
+                state = tab.sessionState
+            )
+        })
+    }
+
+    private fun actionRow(left: View, right: View): LinearLayout {
+        return LinearLayout(this).apply {
+            gravity = Gravity.CENTER
+            orientation = LinearLayout.HORIZONTAL
+            addView(left, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginEnd = ChromeSheet.dp(this@MainActivity, 6)
+            })
+            addView(right, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginStart = ChromeSheet.dp(this@MainActivity, 6)
+            })
+        }
+    }
+
     private fun recordHistory(tab: BrowserTab) {
         if (tab.isPrivate || tab.url.isBlank() || isHomeUrl(tab.url)) return
         val title = tab.title.ifBlank { tab.url }
@@ -871,7 +1588,7 @@ class MainActivity : Activity() {
     }
 
     private fun isHomeUrl(url: String): Boolean {
-        return url.trimEnd('/') == getString(R.string.home_url).trimEnd('/')
+        return url.trimEnd('/') == browserPreferences.homepageUrl.trimEnd('/')
     }
 
     private fun openHistoryEntry(url: String) {
@@ -893,33 +1610,38 @@ class MainActivity : Activity() {
             createTab = { mode ->
                 val tab = tabs.create(mode)
                 attachTab(tab)
-                tab.session.loadUri(getString(R.string.home_url))
+                tab.session.loadUri(browserPreferences.homepageUrl)
                 setChromeVisible(true)
             },
             closeTab = { tab ->
+                rememberClosedTab(tab)
                 tabThumbnails.remove(tab.id)
                 tabs.close(tab.id)
                 attachCurrentOrCreate()
+                saveNormalSession()
                 updateUi()
-            }
+            },
+            closeTabs = { mode -> closeTabs(mode) },
+            undoCloseTab = ::undoCloseTab
         ).show()
     }
 
     private fun resetBrowserState() {
+        sessionStore.clear()
         tabs.all().map { it.id }.forEach {
             tabThumbnails.remove(it)
             tabs.close(it)
         }
         val tab = tabs.create(TabMode.NORMAL)
         attachTab(tab)
-        tab.session.loadUri(getString(R.string.home_url))
+        tab.session.loadUri(browserPreferences.homepageUrl)
     }
 
     private fun attachCurrentOrCreate() {
         val active = tabs.activeTab ?: tabs.create(TabMode.NORMAL)
         attachTab(active)
         if (active.url.isBlank()) {
-            active.session.loadUri(getString(R.string.home_url))
+            active.session.loadUri(browserPreferences.homepageUrl)
         }
     }
 
@@ -928,7 +1650,16 @@ class MainActivity : Activity() {
         tabs.select(tab.id)
         binding.geckoView.setSession(tab.session)
         binding.addressBar.setText(tab.url)
+        updatePrivateWindowProtection(tab)
         updateUi()
+    }
+
+    private fun updatePrivateWindowProtection(tab: BrowserTab?) {
+        if (tab?.isPrivate == true) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        }
     }
 
     private fun captureThumbnail(tab: BrowserTab) {
@@ -976,8 +1707,17 @@ class MainActivity : Activity() {
         binding.tabsButton.contentDescription = "${tabs.count()} tabs"
         binding.extensionsButton.contentDescription = "${extensionActionRegistry.entries().size} extensions"
         binding.settingsButton.contentDescription = getString(R.string.action_settings)
+        binding.securityIcon.imageTintList = ColorStateList.valueOf(
+            getColor(if (tab?.isSecure == true) R.color.kernel_accent else R.color.kernel_muted)
+        )
+        binding.securityIcon.contentDescription = securitySummary(tab)
         binding.progressBar.visibility = if (loading) View.VISIBLE else View.GONE
         binding.progressBar.progress = tab?.progress ?: 0
         title = tab?.title?.takeIf { it.isNotBlank() } ?: getString(R.string.app_name)
+    }
+
+    private companion object {
+        const val REQUEST_FILE_PICKER = 41
+        const val REQUEST_ANDROID_PERMISSIONS = 42
     }
 }
