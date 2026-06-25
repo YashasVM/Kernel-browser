@@ -13,6 +13,9 @@ class BrowserTab(
     var progress: Int = 0
     var canGoBack: Boolean = false
     var canGoForward: Boolean = false
+    var isSecure: Boolean = false
+    var securityHost: String = ""
+    var sessionState: String = ""
 
     val isPrivate: Boolean
         get() = mode == TabMode.PRIVATE
