@@ -66,6 +66,7 @@
             android:paddingEnd="4dp">
 
             <ImageView
+                android:id="@+id/securityIcon"
                 android:layout_width="21dp"
                 android:layout_height="21dp"
                 android:contentDescription="@string/app_name"
