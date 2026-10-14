@@ -24,6 +24,7 @@ object ChromeSheet {
         subtitle: String? = null,
         scrollable: Boolean = true,
         showDone: Boolean = true,
+        compactTitle: Boolean = false,
         builder: LinearLayout.(Dialog) -> Unit
     ): Dialog {
         val dialog = Dialog(context)
@@ -45,7 +46,7 @@ object ChromeSheet {
             }
         })
 
-        sheet.addView(header(context, title, subtitle, showDone) { dialog.dismiss() })
+        sheet.addView(header(context, title, subtitle, showDone, compactTitle) { dialog.dismiss() })
 
         val content = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -118,6 +119,18 @@ object ChromeSheet {
             ).apply {
                 bottomMargin = dp(context, 8)
             }
+        }
+    }
+
+    /** The main text of a prompt: page-supplied, so plain, readable, and selectable. */
+    fun message(context: Context, text: String): TextView {
+        return TextView(context).apply {
+            this.text = text
+            textSize = 16f
+            setLineSpacing(dp(context, 3).toFloat(), 1f)
+            setTextColor(context.getColor(R.color.kernel_text))
+            setTextIsSelectable(true)
+            setPadding(dp(context, 2), 0, dp(context, 2), dp(context, 14))
         }
     }
 
@@ -215,6 +228,7 @@ object ChromeSheet {
         title: String,
         subtitle: String?,
         showDone: Boolean,
+        compactTitle: Boolean,
         onDone: () -> Unit
     ): LinearLayout {
         return LinearLayout(context).apply {
@@ -226,7 +240,12 @@ object ChromeSheet {
                 orientation = LinearLayout.VERTICAL
                 addView(TextView(context).apply {
                     text = title
-                    textSize = 26f
+                    // Titles that come from page content (link text, prompts) stay small and short.
+                    textSize = if (compactTitle) 20f else 26f
+                    if (compactTitle) {
+                        maxLines = 2
+                        ellipsize = android.text.TextUtils.TruncateAt.END
+                    }
                     setTextColor(context.getColor(R.color.kernel_text))
                     typeface = android.graphics.Typeface.DEFAULT_BOLD
                 })
@@ -236,6 +255,10 @@ object ChromeSheet {
                         textSize = 14f
                         setTextColor(context.getColor(R.color.kernel_muted))
                         setPadding(0, dp(context, 2), dp(context, 12), 0)
+                        if (compactTitle) {
+                            maxLines = 2
+                            ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+                        }
                     })
                 }
             }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))

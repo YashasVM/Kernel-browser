@@ -287,6 +287,7 @@ class MainActivity : Activity() {
             if (entry.state.isNotBlank()) {
                 runCatching {
                     tab.sessionState = entry.state
+                    tab.sessionStateUrl = tab.url
                     val state = GeckoSession.SessionState.fromString(entry.state)
                         ?: error("Invalid session state")
                     tab.session.restoreState(state)
@@ -833,6 +834,7 @@ class MainActivity : Activity() {
             ) {
                 if (session != tab.session) return
                 tab.sessionState = sessionState.toString()
+                tab.sessionStateUrl = tab.url
                 // Fires on every scroll; batch the writes instead of hitting disk each time.
                 if (!tab.isPrivate) scheduleSessionSave()
             }
@@ -1188,7 +1190,8 @@ class MainActivity : Activity() {
         ChromeSheet.show(
             context = this,
             title = tab?.title?.takeIf { it.isNotBlank() } ?: "Menu",
-            subtitle = runCatching { Uri.parse(url).host }.getOrNull()?.removePrefix("www.") ?: url.takeIf { it.isNotBlank() }
+            subtitle = runCatching { Uri.parse(url).host }.getOrNull()?.removePrefix("www.") ?: url.takeIf { it.isNotBlank() },
+            compactTitle = true
         ) { dialog ->
             fun run(action: () -> Unit): () -> Unit = {
                 dialog.dismiss()
@@ -1956,7 +1959,9 @@ class MainActivity : Activity() {
             SessionStore.Entry(
                 title = tab.title,
                 url = tab.url.ifBlank { StartPage.SESSION_URL },
-                state = if (tab.url.isBlank()) "" else tab.sessionState
+                // State captured for an earlier page (e.g. a background tab's initial about:blank)
+                // would restore the wrong page; fall back to loading the URL.
+                state = if (tab.url.isBlank() || tab.sessionStateUrl != tab.url) "" else tab.sessionState
             )
         })
     }
@@ -1976,6 +1981,7 @@ class MainActivity : Activity() {
 
     private fun recordHistory(tab: BrowserTab) {
         if (tab.isPrivate || tab.url.isBlank() || isHomeUrl(tab.url)) return
+        if (!tab.url.startsWith("https://") && !tab.url.startsWith("http://")) return
         val title = tab.title.ifBlank { tab.url }
         historyStore.record(title, tab.url)
     }
@@ -2360,7 +2366,7 @@ class MainActivity : Activity() {
             ?: element.title?.trim()?.takeIf { it.isNotBlank() }
             ?: element.altText?.trim()?.takeIf { it.isNotBlank() }
             ?: link ?: media!!
-        ChromeSheet.show(this, title = title.take(120), subtitle = (link ?: media)?.let(::shortUrl)) { dialog ->
+        ChromeSheet.show(this, title = title.take(200), subtitle = (link ?: media)?.let(::readableUrl), compactTitle = true) { dialog ->
             fun run(action: () -> Unit): () -> Unit = {
                 dialog.dismiss()
                 action()
@@ -2414,9 +2420,10 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun shortUrl(url: String): String {
-        val host = runCatching { Uri.parse(url).host }.getOrNull()?.removePrefix("www.")
-        return if (host.isNullOrBlank()) url.take(80) else host
+    /** A URL without its scheme and www., decoded, for showing to people. */
+    private fun readableUrl(url: String): String {
+        val trimmed = url.replaceFirst(Regex("^https?://(www\\.)?", RegexOption.IGNORE_CASE), "")
+        return runCatching { Uri.decode(trimmed) }.getOrDefault(trimmed).take(300)
     }
 
     /** Opens [url] in a tab the current one is the parent of, so Back from it comes home. */

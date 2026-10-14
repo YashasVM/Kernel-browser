@@ -69,7 +69,8 @@ class WebPrompts(
         scrollable: Boolean = true,
         builder: LinearLayout.(Dialog) -> Unit
     ): Dialog {
-        val dialog = ChromeSheet.show(context, title, subtitle, scrollable = scrollable, showDone = false, builder = builder)
+        val dialog = ChromeSheet.show(context, title, subtitle, scrollable = scrollable, showDone = false,
+            compactTitle = true, builder = builder)
         dialog.setOnDismissListener { once.dismiss() }
         once.dialog = dialog
         return dialog
@@ -77,8 +78,8 @@ class WebPrompts(
 
     fun alert(prompt: PromptDelegate.AlertPrompt, origin: String?): GeckoResult<PromptResponse> {
         val (once, result) = begin(prompt)
-        sheet(once, title = prompt.title?.takeIf { it.isNotBlank() } ?: siteSays(origin)) { dialog ->
-            prompt.message?.takeIf { it.isNotBlank() }?.let { addView(ChromeSheet.note(context, it)) }
+        sheet(once, title = siteSays(origin)) { dialog ->
+            prompt.message?.takeIf { it.isNotBlank() }?.let { addView(ChromeSheet.message(context, it.take(MAX_MESSAGE))) }
             addView(ChromeSheet.actionButton(context, "OK", primary = true) { dialog.dismiss() })
         }
         return result
@@ -86,8 +87,8 @@ class WebPrompts(
 
     fun button(prompt: PromptDelegate.ButtonPrompt, origin: String?): GeckoResult<PromptResponse> {
         val (once, result) = begin(prompt)
-        sheet(once, title = prompt.title?.takeIf { it.isNotBlank() } ?: siteSays(origin)) { dialog ->
-            prompt.message?.takeIf { it.isNotBlank() }?.let { addView(ChromeSheet.note(context, it)) }
+        sheet(once, title = siteSays(origin)) { dialog ->
+            prompt.message?.takeIf { it.isNotBlank() }?.let { addView(ChromeSheet.message(context, it.take(MAX_MESSAGE))) }
             addView(ChromeSheet.buttonRow(
                 context,
                 ChromeSheet.actionButton(context, "Cancel") {
@@ -106,8 +107,8 @@ class WebPrompts(
     fun text(prompt: PromptDelegate.TextPrompt, origin: String?): GeckoResult<PromptResponse> {
         val (once, result) = begin(prompt)
         val input = ChromeSheet.textField(context, hint = "", value = prompt.defaultValue)
-        sheet(once, title = prompt.title?.takeIf { it.isNotBlank() } ?: siteSays(origin), scrollable = false) { dialog ->
-            prompt.message?.takeIf { it.isNotBlank() }?.let { addView(ChromeSheet.note(context, it)) }
+        sheet(once, title = siteSays(origin), scrollable = false) { dialog ->
+            prompt.message?.takeIf { it.isNotBlank() }?.let { addView(ChromeSheet.message(context, it.take(MAX_MESSAGE))) }
             addView(input)
             val submit = {
                 once.complete { prompt.confirm(input.text.toString()) }
@@ -133,7 +134,7 @@ class WebPrompts(
         val password = ChromeSheet.textField(context, hint = "Password", value = options.password, password = true)
         val host = runCatching { Uri.parse(options.uri).host }.getOrNull() ?: origin
         sheet(once, title = "Sign in", subtitle = host, scrollable = false) { dialog ->
-            prompt.message?.takeIf { it.isNotBlank() }?.let { addView(ChromeSheet.note(context, it)) }
+            prompt.message?.takeIf { it.isNotBlank() }?.let { addView(ChromeSheet.message(context, it.take(MAX_MESSAGE))) }
             if (options.level == PromptDelegate.AuthPrompt.AuthOptions.Level.NONE) {
                 addView(ChromeSheet.note(context, "Your sign-in details will be sent without encryption."))
             }
@@ -164,7 +165,7 @@ class WebPrompts(
         val selected = linkedSetOf<String>()
         prompt.choices.flatMap { it.items?.toList() ?: listOf(it) }.forEach { if (it.selected) selected += it.id }
         sheet(once, title = prompt.title?.takeIf { it.isNotBlank() } ?: if (multiple) "Choose options" else "Choose an option") { dialog ->
-            prompt.message?.takeIf { it.isNotBlank() }?.let { addView(ChromeSheet.note(context, it)) }
+            prompt.message?.takeIf { it.isNotBlank() }?.let { addView(ChromeSheet.message(context, it.take(MAX_MESSAGE))) }
             val rows = mutableListOf<View>()
             fun flushGroup() {
                 if (rows.isNotEmpty()) {
@@ -417,6 +418,7 @@ class WebPrompts(
 
     companion object {
         private const val POPUP_DECISION_MS = 6_000L
+        private const val MAX_MESSAGE = 2_000
         private val COLOR_PRESETS = listOf(
             "#000000", "#5f6368", "#9aa0a6", "#dadce0", "#ffffff", "#e8eaed",
             "#ea4335", "#fbbc04", "#34a853", "#4285f4", "#a142f4", "#f439a0",
