@@ -75,10 +75,18 @@ class MainActivity : Activity() {
     private lateinit var loginStore: LoginStore
     private lateinit var sessionStore: SessionStore
     private lateinit var browserPreferences: BrowserPreferences
+    private lateinit var snackbar: KernelSnackbar
+    private lateinit var webPrompts: WebPrompts
     private val tabThumbnails = mutableMapOf<Long, Bitmap>()
     private var bottomInset = 0
     private var chromeHidden = false
     private var addressBarEditing = false
+    /** True once the user has typed since focusing the address bar (vs. the URL we filled in). */
+    private var addressEdited = false
+    private var settingAddressText = false
+    private var findActive = false
+    private var tabSwitcherPending = false
+    private var topContentInset = 0f
     private var suggestionsVisible = false
     private var suggestionRequestId = 0
     private val searchRecommendationCache = object : LinkedHashMap<String, List<String>>(64, 0.75f, true) {
@@ -96,7 +104,7 @@ class MainActivity : Activity() {
     private val saveSessionRunnable = Runnable { saveNormalSession() }
     private val suggestionExecutor = Executors.newSingleThreadExecutor()
     private var pendingSuggestionQuery: Runnable? = null
-    private val pendingDownloads = mutableListOf<WebResponse>()
+    private val pendingDownloads = mutableListOf<PendingDownload>()
     private var extensionActiveSession: GeckoSession? = null
 
     private data class AddressSuggestion(
@@ -106,6 +114,12 @@ class MainActivity : Activity() {
         val kind: SuggestionKind
     )
 
+    private data class PendingDownload(
+        val uri: String,
+        val contentDisposition: String?,
+        val contentType: String?
+    )
+
     private data class ClosedTab(
         val title: String,
         val url: String
@@ -113,6 +127,7 @@ class MainActivity : Activity() {
 
     private enum class SuggestionKind {
         HISTORY,
+        BOOKMARK,
         SEARCH,
         NAVIGATE
     }
@@ -122,6 +137,8 @@ class MainActivity : Activity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
         configureSystemBars()
+        snackbar = KernelSnackbar(binding.root, bottomOffset = ::snackbarOffset, maxWidth = ::chromeWidth)
+        webPrompts = WebPrompts(this) { message, action, onAction -> showMessage(message, action, onAction) }
 
         browserPreferences = BrowserPreferences(this)
         historyStore = BrowserHistoryStore(this)
@@ -223,15 +240,36 @@ class MainActivity : Activity() {
         val tab = tabs.activeTab
         if (fullScreenSession != null) {
             fullScreenSession?.exitFullScreen()
+        } else if (findActive) {
+            hideFindBar()
         } else if (binding.addressBar.hasFocus()) {
             binding.addressBar.clearFocus()
             (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
                 .hideSoftInputFromWindow(binding.addressBar.windowToken, 0)
         } else if (tab?.canGoBack == true) {
             tab.session.goBack()
+        } else if (tab != null && returnToParentTab(tab)) {
+            return true
         } else {
             return false
         }
+        return true
+    }
+
+    private fun parentTabOf(tab: BrowserTab): BrowserTab? {
+        val parentId = tab.parentId ?: return null
+        return tabs.all().firstOrNull { it.id == parentId }
+    }
+
+    /** Back on a tab a link opened closes it and returns to the page that opened it, like Chrome. */
+    private fun returnToParentTab(tab: BrowserTab): Boolean {
+        val parent = parentTabOf(tab) ?: return false
+        rememberClosedTab(tab)
+        tabThumbnails.remove(tab.id)
+        tabs.close(tab.id)
+        attachTab(parent)
+        saveNormalSession()
+        setChromeVisible(true)
         return true
     }
 
@@ -251,6 +289,7 @@ class MainActivity : Activity() {
             if (entry.state.isNotBlank()) {
                 runCatching {
                     tab.sessionState = entry.state
+                    tab.sessionStateUrl = tab.url
                     val state = GeckoSession.SessionState.fromString(entry.state)
                         ?: error("Invalid session state")
                     tab.session.restoreState(state)
@@ -289,9 +328,17 @@ class MainActivity : Activity() {
                 .withEndAction { scheduleChromeAutoHide() }
                 .start()
         }
-        binding.backButton.setOnClickListener { tabs.activeTab?.session?.goBack() }
+        binding.backButton.setOnClickListener {
+            val tab = tabs.activeTab ?: return@setOnClickListener
+            if (tab.canGoBack) tab.session.goBack() else returnToParentTab(tab)
+        }
         binding.forwardButton.setOnClickListener { tabs.activeTab?.session?.goForward() }
         binding.reloadButton.setOnClickListener {
+            if (binding.addressBar.hasFocus()) {
+                // While editing, this slot is a clear button.
+                binding.addressBar.setText("")
+                return@setOnClickListener
+            }
             val tab = tabs.activeTab ?: return@setOnClickListener
             if (tab.isLoading) {
                 tab.session.stop()
@@ -306,6 +353,23 @@ class MainActivity : Activity() {
             setChromeVisible(true)
             showTabsDialog()
         }
+        binding.tabsButton.setOnLongClickListener {
+            it.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+            showTabShortcuts()
+            true
+        }
+        binding.securityIcon.setOnClickListener {
+            if (binding.addressBar.hasFocus()) {
+                binding.addressBar.setText("")
+            } else if (tabs.activeTab?.url.isNullOrBlank()) {
+                focusAddressBar()
+            } else {
+                showSiteInfo()
+            }
+        }
+        configureFindBar()
+        configurePullToRefresh()
+        configureAddressSwipe()
         binding.extensionsButton.setOnClickListener {
             setChromeVisible(true)
             extensionsUi.show()
@@ -315,8 +379,13 @@ class MainActivity : Activity() {
             showBrowserMenu()
         }
         binding.geckoView.setOnTouchListener { _, event ->
-            if (event.action == MotionEvent.ACTION_DOWN && chromeHidden) {
-                setChromeVisible(true)
+            if (event.action == MotionEvent.ACTION_DOWN) {
+                if (chromeHidden) setChromeVisible(true)
+                // Tapping the page dismisses the address bar like it does in other browsers.
+                if (binding.addressBar.hasFocus()) {
+                    binding.addressBar.clearFocus()
+                    hideKeyboard(binding.addressBar)
+                }
             }
             false
         }
@@ -335,21 +404,31 @@ class MainActivity : Activity() {
         }
         binding.addressBar.setOnFocusChangeListener { _, hasFocus ->
             addressBarEditing = hasFocus
+            addressEdited = false
+            // While typing, the navigation row is dead weight; give the suggestions its room.
+            if (!findActive) binding.bottomBar.visibility = if (hasFocus) View.GONE else View.VISIBLE
             if (hasFocus) {
                 cancelChromeAutoHide()
                 setChromeVisible(true)
+                // Editing shows the full URL, selected, so typing replaces it.
+                setAddressText(tabs.activeTab?.url.orEmpty())
+                binding.addressBar.post { if (binding.addressBar.hasFocus()) binding.addressBar.selectAll() }
                 updateAddressSuggestions()
             } else {
                 hideAddressSuggestions()
+                refreshAddressText()
                 scheduleChromeAutoHide()
             }
+            updateUi()
         }
         binding.addressBar.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
 
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
                 if (binding.addressBar.hasFocus()) {
+                    if (!settingAddressText) addressEdited = true
                     updateAddressSuggestions()
+                    updateUi()
                 }
             }
 
@@ -373,15 +452,12 @@ class MainActivity : Activity() {
     private fun configureInsets() {
         binding.root.setOnApplyWindowInsetsListener { _, insets ->
             val topInset = insets.systemWindowInsetTop
+            topContentInset = topInset.toFloat()
             bottomInset = insets.systemWindowInsetBottom
 
             val geckoParams = binding.geckoView.layoutParams as FrameLayout.LayoutParams
             geckoParams.topMargin = topInset
             binding.geckoView.layoutParams = geckoParams
-
-            val progressParams = binding.progressBar.layoutParams as FrameLayout.LayoutParams
-            progressParams.topMargin = topInset
-            binding.progressBar.layoutParams = progressParams
 
             val params = binding.bottomChrome.layoutParams as FrameLayout.LayoutParams
             params.bottomMargin = bottomInset + ChromeSheet.dp(this, 12)
@@ -423,7 +499,7 @@ class MainActivity : Activity() {
                     lastScrollYPx = update.scrollY * update.zoom
                     return
                 }
-                if (binding.addressBar.hasFocus()) {
+                if (binding.addressBar.hasFocus() || findActive) {
                     lastScrollYPx = update.scrollY * update.zoom
                     return
                 }
@@ -449,7 +525,7 @@ class MainActivity : Activity() {
             override fun onCloseRequest(session: GeckoSession) {
                 if (fullScreenSession == session) onFullScreenChanged(session, false)
                 rememberClosedTab(tab)
-                tabThumbnails.remove(tab.id)?.recycle()
+                tabThumbnails.remove(tab.id)
                 tabs.close(tab.id)
                 attachCurrentOrCreate()
                 saveNormalSession()
@@ -460,11 +536,26 @@ class MainActivity : Activity() {
             }
 
             override fun onExternalResponse(session: GeckoSession, response: WebResponse) {
-                if (isExtensionPackage(response.uri, response.headers["Content-Type"] ?: response.headers["content-type"])) {
+                val contentType = response.headers["Content-Type"] ?: response.headers["content-type"]
+                if (isExtensionPackage(response.uri, contentType)) {
                     extensionManager.install(response.uri)
                 } else {
-                    startDownload(response)
+                    startDownload(PendingDownload(
+                        uri = response.uri,
+                        contentDisposition = response.headers["Content-Disposition"] ?: response.headers["content-disposition"],
+                        contentType = contentType
+                    ))
                 }
+            }
+
+            override fun onContextMenu(
+                session: GeckoSession,
+                screenX: Int,
+                screenY: Int,
+                element: GeckoSession.ContentDelegate.ContextElement
+            ) {
+                if (session != tabs.activeTab?.session) return
+                showContextMenu(tab, element)
             }
 
             override fun onCrash(session: GeckoSession) {
@@ -563,6 +654,41 @@ class MainActivity : Activity() {
         }
 
         tab.session.promptDelegate = object : GeckoSession.PromptDelegate {
+            private fun origin() = tab.url.takeIf { it.isNotBlank() }
+
+            override fun onAlertPrompt(session: GeckoSession, prompt: GeckoSession.PromptDelegate.AlertPrompt) =
+                webPrompts.alert(prompt, origin())
+
+            override fun onButtonPrompt(session: GeckoSession, prompt: GeckoSession.PromptDelegate.ButtonPrompt) =
+                webPrompts.button(prompt, origin())
+
+            override fun onTextPrompt(session: GeckoSession, prompt: GeckoSession.PromptDelegate.TextPrompt) =
+                webPrompts.text(prompt, origin())
+
+            override fun onAuthPrompt(session: GeckoSession, prompt: GeckoSession.PromptDelegate.AuthPrompt) =
+                webPrompts.auth(prompt, origin())
+
+            override fun onChoicePrompt(session: GeckoSession, prompt: GeckoSession.PromptDelegate.ChoicePrompt) =
+                webPrompts.choice(prompt)
+
+            override fun onColorPrompt(session: GeckoSession, prompt: GeckoSession.PromptDelegate.ColorPrompt) =
+                webPrompts.color(prompt)
+
+            override fun onDateTimePrompt(session: GeckoSession, prompt: GeckoSession.PromptDelegate.DateTimePrompt) =
+                webPrompts.dateTime(prompt)
+
+            override fun onPopupPrompt(session: GeckoSession, prompt: GeckoSession.PromptDelegate.PopupPrompt) =
+                webPrompts.popup(prompt)
+
+            override fun onBeforeUnloadPrompt(session: GeckoSession, prompt: GeckoSession.PromptDelegate.BeforeUnloadPrompt) =
+                webPrompts.beforeUnload(prompt)
+
+            override fun onRepostConfirmPrompt(session: GeckoSession, prompt: GeckoSession.PromptDelegate.RepostConfirmPrompt) =
+                webPrompts.repost(prompt)
+
+            override fun onSharePrompt(session: GeckoSession, prompt: GeckoSession.PromptDelegate.SharePrompt) =
+                webPrompts.share(prompt)
+
             override fun onFilePrompt(
                 session: GeckoSession,
                 prompt: GeckoSession.PromptDelegate.FilePrompt
@@ -629,10 +755,10 @@ class MainActivity : Activity() {
                 hasUserGesture: Boolean
             ) {
                 if (session != tab.session) return
+                // A new or restoring session reports about:blank first; keep the URL it is opening.
+                if (isInitialBlank(tab, url)) return
                 tab.url = StartPage.displayUrl(url)
-                if (!binding.addressBar.hasFocus()) {
-                    binding.addressBar.setText(tab.url)
-                }
+                if (tab == tabs.activeTab) refreshAddressText()
                 recordHistory(tab)
                 updateUi()
             }
@@ -658,11 +784,16 @@ class MainActivity : Activity() {
                     if (request.hasUserGesture || request.isDirectNavigation) extensionManager.install(request.uri)
                     return GeckoResult.fromValue(AllowOrDeny.DENY)
                 }
+                if (ExternalLinks.classify(request.uri) != ExternalLinks.Kind.WEB) {
+                    openExternally(tab, request.uri, request.hasUserGesture || request.isDirectNavigation)
+                    return GeckoResult.fromValue(AllowOrDeny.DENY)
+                }
                 return GeckoResult.fromValue(AllowOrDeny.ALLOW)
             }
 
             override fun onNewSession(session: GeckoSession, uri: String): GeckoResult<GeckoSession> {
                 val newTab = tabs.create(tab.mode, open = false)
+                newTab.parentId = tab.id
                 attachTab(newTab)
                 newTab.url = uri
                 updateUi()
@@ -675,7 +806,7 @@ class MainActivity : Activity() {
                 if (session != tab.session) return
                 if (tab == tabs.activeTab) markExtensionActiveTab(session)
                 tab.isLoading = true
-                tab.url = StartPage.displayUrl(url)
+                if (!isInitialBlank(tab, url)) tab.url = StartPage.displayUrl(url)
                 setChromeVisible(true)
                 updateUi()
             }
@@ -712,6 +843,7 @@ class MainActivity : Activity() {
             ) {
                 if (session != tab.session) return
                 tab.sessionState = sessionState.toString()
+                tab.sessionStateUrl = tab.url
                 // Fires on every scroll; batch the writes instead of hitting disk each time.
                 if (!tab.isPrivate) scheduleSessionSave()
             }
@@ -720,44 +852,45 @@ class MainActivity : Activity() {
 
     private fun loadFromAddressBar() {
         val normalized = UrlNormalizer.normalize(binding.addressBar.text.toString(), browserPreferences.searchEngine)
-        tabs.activeTab?.session?.loadUri(normalized)
+        val tab = tabs.activeTab ?: return
+        tab.url = normalized
+        tab.session.loadUri(normalized)
         addressBarEditing = false
         hideAddressSuggestions()
         binding.addressBar.clearFocus()
-        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
-        imm.hideSoftInputFromWindow(binding.addressBar.windowToken, 0)
+        hideKeyboard(binding.addressBar)
         setChromeVisible(true)
     }
 
     private fun loadSuggestion(suggestion: AddressSuggestion) {
         val url = when (suggestion.kind) {
-            SuggestionKind.HISTORY -> suggestion.value
+            SuggestionKind.HISTORY, SuggestionKind.BOOKMARK -> suggestion.value
             SuggestionKind.NAVIGATE -> UrlNormalizer.normalize(suggestion.value, browserPreferences.searchEngine)
             SuggestionKind.SEARCH -> UrlNormalizer.normalize(suggestion.value, browserPreferences.searchEngine)
         }
-        binding.addressBar.setText(suggestion.value)
-        binding.addressBar.setSelection(binding.addressBar.text.length)
-        tabs.activeTab?.session?.loadUri(url)
+        val tab = tabs.activeTab ?: return
+        tab.url = url
+        tab.session.loadUri(url)
         addressBarEditing = false
         hideAddressSuggestions()
         binding.addressBar.clearFocus()
-        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
-        imm.hideSoftInputFromWindow(binding.addressBar.windowToken, 0)
+        hideKeyboard(binding.addressBar)
         setChromeVisible(true)
     }
 
     private fun updateAddressSuggestions() {
-        val query = binding.addressBar.text.toString().trim()
         if (!binding.addressBar.hasFocus()) {
             hideAddressSuggestions()
             return
         }
+        // Until the user types, the field holds the current URL; suggest recent pages instead.
+        val query = if (addressEdited) binding.addressBar.text.toString().trim() else ""
 
         val localSuggestions = localAddressSuggestions(query)
         val cachedRecommendations = searchRecommendationCache[query.lowercase()].orEmpty()
         renderAddressSuggestions((localSuggestions + cachedRecommendations.map {
             AddressSuggestion(it, "Search ${browserPreferences.searchEngine.displayName}", it, SuggestionKind.SEARCH)
-        }).distinctBy { it.kind.name + it.value }.take(4))
+        }).distinctBy { it.value.lowercase() }.take(maxSuggestionRows()))
 
         if (query.length >= 2 && cachedRecommendations.isEmpty()) {
             fetchSearchRecommendations(query)
@@ -766,26 +899,35 @@ class MainActivity : Activity() {
 
     private fun localAddressSuggestions(query: String): List<AddressSuggestion> {
         val normalizedQuery = query.lowercase()
-        val history = (bookmarksStore.entries() + historyStore.entries()).distinctBy { it.second }
+        val bookmarkUrls = bookmarksStore.entries().map { it.second }.toSet()
+        // Older builds could record about:blank and similar; only suggest real web pages.
+        fun isWeb(entry: Pair<String, String>) = entry.second.startsWith("https://") || entry.second.startsWith("http://")
+        val history = (bookmarksStore.entries() + historyStore.entries()).filter(::isWeb).distinctBy { it.second }
         val matches = if (query.isBlank()) {
-            history.take(5)
+            historyStore.entries().filter(::isWeb).take(5)
         } else {
             history.filter { (title, url) ->
                 title.lowercase().contains(normalizedQuery) || url.lowercase().contains(normalizedQuery)
-            }.take(4)
+            }.sortedByDescending { (_, url) ->
+                // Pages whose host starts with what you typed are what you most likely meant.
+                val host = runCatching { Uri.parse(url).host.orEmpty() }.getOrDefault("").removePrefix("www.")
+                host.startsWith(normalizedQuery)
+            }.take(3)
         }.map { (title, url) ->
             AddressSuggestion(
                 title = title.ifBlank { url },
-                subtitle = url,
+                subtitle = AddressDisplay.format(url, browserPreferences.searchEngine).let { shown ->
+                    if (shown == title) url else shown
+                },
                 value = url,
-                kind = SuggestionKind.HISTORY
+                kind = if (url in bookmarkUrls) SuggestionKind.BOOKMARK else SuggestionKind.HISTORY
             )
         }
 
         if (query.isBlank()) return matches
 
         val primary = if (looksLikeUrl(query)) {
-            AddressSuggestion(query, "Open website", query, SuggestionKind.NAVIGATE)
+            AddressSuggestion(query, "Go to site", query, SuggestionKind.NAVIGATE)
         } else {
             AddressSuggestion(query, "Search ${browserPreferences.searchEngine.displayName}", query, SuggestionKind.SEARCH)
         }
@@ -844,10 +986,10 @@ class MainActivity : Activity() {
         suggestions.forEachIndexed { index, suggestion ->
             binding.suggestionsPanel.addView(suggestionRow(suggestion), LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                ChromeSheet.dp(this, 58)
+                ChromeSheet.dp(this, SUGGESTION_ROW_DP)
             ).apply {
                 if (index < suggestions.lastIndex) {
-                    bottomMargin = ChromeSheet.dp(this@MainActivity, 4)
+                    bottomMargin = ChromeSheet.dp(this@MainActivity, 2)
                 }
             })
         }
@@ -858,20 +1000,26 @@ class MainActivity : Activity() {
         return LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(ChromeSheet.dp(this@MainActivity, 12), 0, ChromeSheet.dp(this@MainActivity, 10), 0)
+            setPadding(ChromeSheet.dp(this@MainActivity, 10), 0, ChromeSheet.dp(this@MainActivity, 2), 0)
             background = suggestionRowBackground()
-            foreground = selectableItemBackground()
             isClickable = true
             isFocusable = true
             contentDescription = "${suggestion.title}, ${suggestion.subtitle}"
             setOnClickListener { loadSuggestion(suggestion) }
 
             addView(ImageView(this@MainActivity).apply {
-                setImageResource(if (suggestion.kind == SuggestionKind.HISTORY) R.drawable.ic_home else R.drawable.ic_search)
+                setImageResource(when (suggestion.kind) {
+                    SuggestionKind.HISTORY -> R.drawable.ic_history
+                    SuggestionKind.BOOKMARK -> R.drawable.ic_bookmark
+                    SuggestionKind.NAVIGATE -> R.drawable.ic_globe
+                    SuggestionKind.SEARCH -> R.drawable.ic_search
+                })
                 imageTintList = ColorStateList.valueOf(getColor(R.color.kernel_muted))
-                scaleType = ImageView.ScaleType.CENTER
+                scaleType = ImageView.ScaleType.FIT_CENTER
+                val pad = ChromeSheet.dp(this@MainActivity, 5)
+                setPadding(pad, pad, pad, pad)
             }, LinearLayout.LayoutParams(ChromeSheet.dp(this@MainActivity, 30), ChromeSheet.dp(this@MainActivity, 30)).apply {
-                marginEnd = ChromeSheet.dp(this@MainActivity, 12)
+                marginEnd = ChromeSheet.dp(this@MainActivity, 10)
             })
 
             addView(LinearLayout(this@MainActivity).apply {
@@ -895,7 +1043,32 @@ class MainActivity : Activity() {
                     setTextColor(getColor(R.color.kernel_muted))
                 })
             }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+
+            // Fill the address bar without going, to refine a suggestion (like Chrome's arrow).
+            addView(ImageView(this@MainActivity).apply {
+                setImageResource(R.drawable.ic_north_west)
+                imageTintList = ColorStateList.valueOf(getColor(R.color.kernel_muted))
+                scaleType = ImageView.ScaleType.CENTER
+                background = selectableItemBackground()
+                contentDescription = "Edit ${suggestion.title}"
+                isClickable = true
+                isFocusable = true
+                setOnClickListener {
+                    val text = if (suggestion.kind == SuggestionKind.SEARCH) suggestion.value + " " else suggestion.value
+                    binding.addressBar.setText(text)
+                    binding.addressBar.setSelection(binding.addressBar.text.length)
+                }
+            }, LinearLayout.LayoutParams(ChromeSheet.dp(this@MainActivity, 44), ChromeSheet.dp(this@MainActivity, 44)))
         }
+    }
+
+    /** As many rows as fit between the top of the screen and the toolbar (fewer with the keyboard up). */
+    private fun maxSuggestionRows(): Int {
+        val rootHeight = binding.root.height.takeIf { it > 0 } ?: return 5
+        val reserved = (binding.bottomChrome.layoutParams as FrameLayout.LayoutParams).bottomMargin +
+            binding.bottomChrome.height + ChromeSheet.dp(this, 48)
+        val row = ChromeSheet.dp(this, SUGGESTION_ROW_DP + 2)
+        return ((rootHeight - reserved) / row).coerceIn(2, 7)
     }
 
     private fun showAddressSuggestions() {
@@ -937,15 +1110,20 @@ class MainActivity : Activity() {
         params.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
         params.marginStart = 0
         params.marginEnd = 0
-        params.bottomMargin = bottomInset + binding.bottomChrome.height + ChromeSheet.dp(this, 24)
+        val chromeMargin = (binding.bottomChrome.layoutParams as FrameLayout.LayoutParams).bottomMargin
+        params.bottomMargin = chromeMargin + binding.bottomChrome.height + ChromeSheet.dp(this, 8)
         binding.suggestionsPanel.layoutParams = params
     }
 
-    private fun suggestionRowBackground(): android.graphics.drawable.GradientDrawable {
+    private fun suggestionRowBackground(): android.graphics.drawable.Drawable {
         return android.graphics.drawable.GradientDrawable().apply {
             shape = android.graphics.drawable.GradientDrawable.RECTANGLE
             setColor(getColor(R.color.kernel_surface_alt))
-            cornerRadius = ChromeSheet.dp(this@MainActivity, 18).toFloat()
+            cornerRadius = ChromeSheet.dp(this@MainActivity, 16).toFloat()
+        }.let { shape ->
+            android.graphics.drawable.RippleDrawable(
+                ColorStateList.valueOf(0x33FFFFFF), shape, shape
+            )
         }
     }
 
@@ -989,6 +1167,7 @@ class MainActivity : Activity() {
                     binding.bottomChrome.visibility = View.INVISIBLE
                 }
                 updateGeckoChromeInsets()
+                snackbar.reposition()
                 if (visible) scheduleChromeAutoHide()
             }
             .start()
@@ -1023,7 +1202,8 @@ class MainActivity : Activity() {
         ChromeSheet.show(
             context = this,
             title = tab?.title?.takeIf { it.isNotBlank() } ?: "Menu",
-            subtitle = runCatching { Uri.parse(url).host }.getOrNull()?.removePrefix("www.") ?: url.takeIf { it.isNotBlank() }
+            subtitle = runCatching { Uri.parse(url).host }.getOrNull()?.removePrefix("www.") ?: url.takeIf { it.isNotBlank() },
+            compactTitle = true
         ) { dialog ->
             fun run(action: () -> Unit): () -> Unit = {
                 dialog.dismiss()
@@ -1034,13 +1214,8 @@ class MainActivity : Activity() {
                 addView(quickAction(if (bookmarked) R.drawable.ic_bookmark else R.drawable.ic_bookmark_border,
                     if (bookmarked) "Saved" else "Bookmark", run(::toggleBookmark)))
                 addView(quickAction(R.drawable.ic_share, "Share", run(::shareCurrentPage)))
-                addView(quickAction(R.drawable.ic_search, "Find", run(::showFindSheet)))
-                addView(quickAction(R.drawable.ic_add, "New tab", run {
-                    val newTab = tabs.create(TabMode.NORMAL)
-                    attachTab(newTab)
-                    openHome(newTab)
-                    binding.addressBar.requestFocus()
-                }))
+                addView(quickAction(R.drawable.ic_search, "Find", run(::showFindBar)))
+                addView(quickAction(R.drawable.ic_add, "New tab", run { openNewTab(TabMode.NORMAL) }))
             }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
                 bottomMargin = ChromeSheet.dp(this@MainActivity, 4)
             })
@@ -1143,96 +1318,187 @@ class MainActivity : Activity() {
     private fun toggleBookmark() {
         val tab = tabs.activeTab ?: return
         if (tab.url.isBlank()) return
-        val saved = bookmarksStore.toggle(tab.title, tab.url)
-        Toast.makeText(this, if (saved) "Bookmark added" else "Bookmark removed", Toast.LENGTH_SHORT).show()
+        val title = tab.title
+        val url = tab.url
+        val saved = bookmarksStore.toggle(title, url)
+        if (saved) {
+            showMessage("Bookmark added")
+        } else {
+            showMessage("Bookmark removed", "Undo") { bookmarksStore.add(title, url) }
+        }
         updateUi()
     }
 
     private fun showBookmarksSheet() {
-        ChromeSheet.show(
-            context = this,
-            title = "Bookmarks",
-            subtitle = "Saved pages"
-        ) { dialog ->
-            val bookmarks = bookmarksStore.entries()
-            if (bookmarks.isEmpty()) {
-                addView(ChromeSheet.note(this@MainActivity, "Bookmarked pages will appear here."))
-            } else {
-                bookmarks.forEach { (title, url) ->
-                    addView(ChromeSheet.row(
-                        context = this@MainActivity,
-                        title = title,
-                        subtitle = url,
+        ChromeSheet.show(this, title = "Bookmarks") { dialog ->
+            val container = this
+            fun render() {
+                container.removeAllViews()
+                val bookmarks = bookmarksStore.entries()
+                if (bookmarks.isEmpty()) {
+                    container.addView(KernelUi.group(this@MainActivity, KernelUi.item(
+                        this@MainActivity,
+                        title = "No bookmarks yet",
+                        subtitle = "Tap Bookmark in the menu to save the page you're on.",
+                        icon = R.drawable.ic_bookmark_border,
+                        tile = R.color.tile_gray
+                    )))
+                    return
+                }
+                container.addView(KernelUi.group(this@MainActivity, bookmarks.map { (title, url) ->
+                    val label = title.ifBlank { url }
+                    val actions = {
+                        showLinkActions(label, url, onRemove = {
+                            bookmarksStore.remove(url)
+                            render()
+                        }, onDone = { dialog.dismiss() })
+                    }
+                    KernelUi.item(
+                        this@MainActivity,
+                        title = label,
+                        subtitle = readableUrl(url),
+                        leading = KernelUi.letterTile(this@MainActivity, AddressDisplay.format(url, browserPreferences.searchEngine).ifBlank { label }, url),
+                        trailing = KernelUi.moreButton(this@MainActivity, "More for $label", actions),
                         onClick = {
                             dialog.dismiss()
-                            tabs.activeTab?.session?.loadUri(url)
-                            setChromeVisible(true)
+                            openHistoryEntry(url)
                         }
-                    ))
-                }
-                addView(ChromeSheet.actionButton(this@MainActivity, "Clear bookmarks", danger = true) {
-                    bookmarksStore.clear()
-                    dialog.dismiss()
-                    Toast.makeText(this@MainActivity, "Bookmarks cleared", Toast.LENGTH_SHORT).show()
-                })
+                    ).apply {
+                        setOnLongClickListener { actions(); true }
+                    }
+                }))
+                container.addView(KernelUi.sectionHeader(this@MainActivity, ""))
+                container.addView(KernelUi.group(this@MainActivity, KernelUi.item(
+                    this@MainActivity, "Clear all bookmarks", icon = R.drawable.ic_delete, tile = R.color.tile_red, danger = true
+                ) {
+                    confirmAction("Clear all bookmarks?", "This removes ${bookmarks.size} saved ${if (bookmarks.size == 1) "page" else "pages"}.", "Clear") {
+                        bookmarksStore.clear()
+                        render()
+                    }
+                }))
             }
+            render()
+        }
+    }
+
+    /** Secondary actions for a saved page (bookmark or history row). */
+    private fun showLinkActions(title: String, url: String, onRemove: (() -> Unit)?, onDone: () -> Unit) {
+        ChromeSheet.show(this, title = title, subtitle = readableUrl(url), compactTitle = true) { dialog ->
+            fun run(action: () -> Unit): () -> Unit = {
+                dialog.dismiss()
+                action()
+            }
+            val rows = mutableListOf<View>(
+                KernelUi.item(this@MainActivity, "Open in new tab", icon = R.drawable.ic_add, tile = R.color.tile_blue,
+                    onClick = run { onDone(); openInTab(url, TabMode.NORMAL) }),
+                KernelUi.item(this@MainActivity, "Open in private tab", icon = R.drawable.ic_private, tile = R.color.tile_indigo,
+                    onClick = run { onDone(); openInTab(url, TabMode.PRIVATE) }),
+                KernelUi.item(this@MainActivity, "Copy link", icon = R.drawable.ic_link, tile = R.color.tile_gray,
+                    onClick = run { copyText("Link", url, "Link copied") }),
+                KernelUi.item(this@MainActivity, "Share", icon = R.drawable.ic_share, tile = R.color.tile_green,
+                    onClick = run { shareText(title, url) })
+            )
+            if (onRemove != null) {
+                rows += KernelUi.item(this@MainActivity, "Remove", icon = R.drawable.ic_delete, tile = R.color.tile_red,
+                    danger = true, onClick = run(onRemove))
+            }
+            addView(KernelUi.group(this@MainActivity, rows))
+        }
+    }
+
+    /** A small confirmation sheet for destructive actions. */
+    private fun confirmAction(title: String, message: String, action: String, onConfirm: () -> Unit) {
+        ChromeSheet.show(this, title = title, subtitle = message, scrollable = false, showDone = false, compactTitle = true) { dialog ->
+            addView(ChromeSheet.buttonRow(
+                this@MainActivity,
+                ChromeSheet.actionButton(this@MainActivity, "Cancel") { dialog.dismiss() },
+                ChromeSheet.actionButton(this@MainActivity, action, danger = true) {
+                    dialog.dismiss()
+                    onConfirm()
+                }
+            ))
         }
     }
 
     private fun showDownloadsSheet() {
-        ChromeSheet.show(
-            context = this,
-            title = "Downloads",
-            subtitle = "Recent files sent to Android downloads"
-        ) { dialog ->
-            val downloads = downloadStore.entries()
-            if (downloads.isEmpty()) {
-                addView(ChromeSheet.note(this@MainActivity, "Files you download will appear here after they start."))
-            } else {
-                downloads.forEach { entry ->
-                    addView(ChromeSheet.row(
-                        context = this@MainActivity,
-                        title = entry.title,
-                        subtitle = "${downloadStatus(entry)} - ${entry.url}",
-                        onClick = { showDownloadActions(entry) }
-                    ))
+        ChromeSheet.show(this, title = "Downloads") { dialog ->
+            val container = this
+            fun render() {
+                container.removeAllViews()
+                val downloads = downloadStore.entries()
+                if (downloads.isEmpty()) {
+                    container.addView(KernelUi.group(this@MainActivity, KernelUi.item(
+                        this@MainActivity,
+                        title = "No downloads yet",
+                        subtitle = "Files you download will show up here.",
+                        icon = R.drawable.ic_download,
+                        tile = R.color.tile_gray
+                    )))
+                } else {
+                    container.addView(KernelUi.group(this@MainActivity, downloads.map { entry ->
+                        val status = downloadStatus(entry)
+                        val tile = when {
+                            status.startsWith("Failed") || status == "Missing" -> R.color.tile_red
+                            status == "Downloaded" || status == "Recorded" -> R.color.tile_green
+                            else -> R.color.tile_orange
+                        }
+                        val actions = { showDownloadActions(entry) { render() } }
+                        KernelUi.item(
+                            this@MainActivity,
+                            title = entry.title,
+                            subtitle = listOf(status, shortHost(entry.url)).filter { it.isNotBlank() }.joinToString(" · "),
+                            icon = R.drawable.ic_download,
+                            tile = tile,
+                            trailing = KernelUi.moreButton(this@MainActivity, "More for ${entry.title}", actions),
+                            onClick = { openDownload(entry) }
+                        ).apply {
+                            setOnLongClickListener { actions(); true }
+                        }
+                    }))
                 }
+                container.addView(KernelUi.sectionHeader(this@MainActivity, ""))
+                val rows = mutableListOf<View>(
+                    KernelUi.item(this@MainActivity, "Open Downloads folder", icon = R.drawable.ic_folder, tile = R.color.tile_blue,
+                        chevron = true, onClick = ::openSystemDownloads)
+                )
+                if (downloads.isNotEmpty()) {
+                    rows += KernelUi.item(this@MainActivity, "Clear list", subtitle = "Files stay on your device.",
+                        icon = R.drawable.ic_delete, tile = R.color.tile_red, danger = true) {
+                        confirmAction("Clear download list?", "Downloaded files stay on your device.", "Clear") {
+                            downloadStore.clear()
+                            render()
+                        }
+                    }
+                }
+                container.addView(KernelUi.group(this@MainActivity, rows))
             }
-            addView(actionRow(
-                ChromeSheet.actionButton(this@MainActivity, "Open Downloads") {
-                    openSystemDownloads()
-                },
-                ChromeSheet.actionButton(this@MainActivity, "Clear", danger = true) {
-                    downloadStore.clear()
-                    dialog.dismiss()
-                    Toast.makeText(this@MainActivity, "Download history cleared", Toast.LENGTH_SHORT).show()
-                }
-            ))
+            render()
         }
     }
 
-    private fun showDownloadActions(entry: DownloadStore.Entry) {
-        ChromeSheet.show(
-            context = this,
-            title = entry.title,
-            subtitle = downloadStatus(entry),
-            scrollable = false
-        ) { dialog ->
-            addView(actionRow(
-                ChromeSheet.actionButton(this@MainActivity, "Open", primary = true) {
-                    dialog.dismiss()
-                    openDownload(entry)
-                },
-                ChromeSheet.actionButton(this@MainActivity, "Remove", danger = true) {
-                    dialog.dismiss()
-                    removeDownload(entry)
-                }
+    private fun shortHost(url: String): String =
+        runCatching { Uri.parse(url).host }.getOrNull()?.removePrefix("www.").orEmpty()
+
+    private fun showDownloadActions(entry: DownloadStore.Entry, onChanged: () -> Unit) {
+        ChromeSheet.show(this, title = entry.title, subtitle = downloadStatus(entry), compactTitle = true) { dialog ->
+            fun run(action: () -> Unit): () -> Unit = {
+                dialog.dismiss()
+                action()
+            }
+            addView(KernelUi.group(
+                this@MainActivity,
+                KernelUi.item(this@MainActivity, "Open", icon = R.drawable.ic_download, tile = R.color.tile_green,
+                    onClick = run { openDownload(entry) }),
+                KernelUi.item(this@MainActivity, "Copy download link", icon = R.drawable.ic_link, tile = R.color.tile_gray,
+                    onClick = run { copyText("Download source", entry.url, "Link copied") }),
+                KernelUi.item(this@MainActivity, "Delete file", icon = R.drawable.ic_delete, tile = R.color.tile_red, danger = true,
+                    onClick = run {
+                        confirmAction("Delete ${entry.title}?", "The file will be removed from your device.", "Delete") {
+                            removeDownload(entry)
+                            onChanged()
+                        }
+                    })
             ))
-            addView(ChromeSheet.actionButton(this@MainActivity, "Copy source") {
-                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                clipboard.setPrimaryClip(ClipData.newPlainText("Download source", entry.url))
-                Toast.makeText(this@MainActivity, "Source copied", Toast.LENGTH_SHORT).show()
-            })
         }
     }
 
@@ -1247,7 +1513,7 @@ class MainActivity : Activity() {
                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 }
                 runCatching { startActivity(intent) }.getOrElse {
-                    Toast.makeText(this, "Could not open download", Toast.LENGTH_SHORT).show()
+                    showMessage("Could not open download")
                 }
                 return
             }
@@ -1261,7 +1527,6 @@ class MainActivity : Activity() {
             runCatching { downloadManager.remove(entry.id) }
         }
         downloadStore.remove(entry.id)
-        Toast.makeText(this, "Download removed", Toast.LENGTH_SHORT).show()
     }
 
     private fun downloadStatus(entry: DownloadStore.Entry): String {
@@ -1288,7 +1553,7 @@ class MainActivity : Activity() {
     private fun undoCloseTab() {
         val closed = lastClosedNormalTab
         if (closed?.url.isNullOrBlank()) {
-            Toast.makeText(this, "No normal tab to restore", Toast.LENGTH_SHORT).show()
+            showMessage("No normal tab to restore")
             return
         }
         val tab = tabs.create(TabMode.NORMAL)
@@ -1319,11 +1584,7 @@ class MainActivity : Activity() {
         }
         saveNormalSession()
         updateUi()
-        Toast.makeText(
-            this,
-            if (mode == TabMode.PRIVATE) "Private tabs closed" else "Normal tabs closed",
-            Toast.LENGTH_SHORT
-        ).show()
+        showMessage(if (mode == TabMode.PRIVATE) "Private tabs closed" else "Normal tabs closed")
     }
 
     private fun rememberClosedTab(tab: BrowserTab) {
@@ -1335,7 +1596,7 @@ class MainActivity : Activity() {
     private fun openSystemDownloads() {
         val intent = Intent(DownloadManager.ACTION_VIEW_DOWNLOADS)
         runCatching { startActivity(intent) }.getOrElse {
-            Toast.makeText(this, "Could not open Downloads", Toast.LENGTH_SHORT).show()
+            showMessage("Could not open Downloads")
         }
     }
 
@@ -1354,7 +1615,7 @@ class MainActivity : Activity() {
     private fun openReaderView() {
         val url = tabs.activeTab?.url.orEmpty()
         if (!url.startsWith("http://") && !url.startsWith("https://")) {
-            Toast.makeText(this, "Reader view needs a web page", Toast.LENGTH_SHORT).show()
+            showMessage("Reader view needs a web page")
             return
         }
         val encoded = URLEncoder.encode(url, "UTF-8")
@@ -1365,122 +1626,56 @@ class MainActivity : Activity() {
     private fun copyCurrentLink() {
         val url = tabs.activeTab?.url.orEmpty()
         if (url.isBlank()) return
-        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newPlainText("Page link", url))
-        Toast.makeText(this, "Link copied", Toast.LENGTH_SHORT).show()
-    }
-
-    private fun showFindSheet() {
-        val input = EditText(this).apply {
-            hint = "Find text"
-            setSingleLine(true)
-            setTextColor(getColor(R.color.kernel_text))
-            setHintTextColor(getColor(R.color.kernel_muted))
-        }
-        ChromeSheet.show(
-            context = this,
-            title = "Find in page",
-            subtitle = "Search the current page",
-            scrollable = false
-        ) { dialog ->
-            addView(input, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ChromeSheet.dp(this@MainActivity, 52)
-            ).apply {
-                bottomMargin = ChromeSheet.dp(this@MainActivity, 10)
-            })
-            addView(actionRow(
-                ChromeSheet.actionButton(this@MainActivity, "Previous") {
-                    findInPage(input.text.toString(), backwards = true)
-                },
-                ChromeSheet.actionButton(this@MainActivity, "Next", primary = true) {
-                    findInPage(input.text.toString(), backwards = false)
-                }
-            ))
-            addView(ChromeSheet.actionButton(this@MainActivity, "Clear") {
-                tabs.activeTab?.session?.finder?.clear()
-                dialog.dismiss()
-            })
-        }
-        input.requestFocus()
-        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
-        imm.showSoftInput(input, InputMethodManager.SHOW_IMPLICIT)
-    }
-
-    private fun findInPage(query: String, backwards: Boolean) {
-        if (query.isBlank()) return
-        val finder = tabs.activeTab?.session?.finder ?: return
-        finder.displayFlags = GeckoSession.FINDER_DISPLAY_HIGHLIGHT_ALL
-        val flags = if (backwards) GeckoSession.FINDER_FIND_BACKWARDS else GeckoSession.FINDER_FIND_FORWARD
-        finder.find(query, flags)
-    }
-
-    private fun showPageZoomSheet() {
-        ChromeSheet.show(
-            context = this,
-            title = "Page zoom",
-            subtitle = "Change page text size across tabs",
-            scrollable = false
-        ) {
-            addView(ChromeSheet.row(
-                context = this@MainActivity,
-                title = "Current zoom",
-                subtitle = "${browserPreferences.pageZoomPercent}%",
-                trailing = ChromeSheet.statusPill(this@MainActivity, "${browserPreferences.pageZoomPercent}%", true)
-            ))
-            addView(actionRow(
-                ChromeSheet.actionButton(this@MainActivity, "-") {
-                    browserPreferences.pageZoomPercent -= 10
-                    applyRuntimePreferences()
-                    Toast.makeText(this@MainActivity, "Zoom ${browserPreferences.pageZoomPercent}%", Toast.LENGTH_SHORT).show()
-                },
-                ChromeSheet.actionButton(this@MainActivity, "+", primary = true) {
-                    browserPreferences.pageZoomPercent += 10
-                    applyRuntimePreferences()
-                    Toast.makeText(this@MainActivity, "Zoom ${browserPreferences.pageZoomPercent}%", Toast.LENGTH_SHORT).show()
-                }
-            ))
-            addView(ChromeSheet.actionButton(this@MainActivity, "Reset") {
-                browserPreferences.pageZoomPercent = 100
-                applyRuntimePreferences()
-                Toast.makeText(this@MainActivity, "Zoom reset", Toast.LENGTH_SHORT).show()
-            })
-        }
+        copyText("Page link", url, "Link copied")
     }
 
     private fun showSiteInfo() {
         val tab = tabs.activeTab
-        ChromeSheet.show(
-            context = this,
-            title = "Site info",
-            subtitle = tab?.securityHost?.ifBlank { tab.url }.orEmpty()
-        ) {
-            addView(ChromeSheet.row(
-                context = this@MainActivity,
-                title = if (tab?.isSecure == true) "Connection secure" else "Connection not verified",
-                subtitle = tab?.url.orEmpty(),
-                trailing = ChromeSheet.statusPill(this@MainActivity, if (tab?.isSecure == true) "HTTPS" else "Info", tab?.isSecure == true)
-            ))
-            addView(ChromeSheet.row(
-                context = this@MainActivity,
-                title = "Clear site data",
-                subtitle = "Clear cookies, cache, permissions, and storage for this site.",
-                onClick = { clearCurrentSiteData() }
-            ))
+        val host = currentHost()
+        val secure = tab?.isSecure == true
+        ChromeSheet.show(this, title = host?.removePrefix("www.") ?: "Site info", subtitle = tab?.url?.let(::readableUrl),
+            compactTitle = true) { dialog ->
+            addView(KernelUi.group(this@MainActivity, KernelUi.item(
+                this@MainActivity,
+                title = if (secure) "Connection is secure" else "Connection is not secure",
+                subtitle = if (secure) {
+                    "Information you send to this site is encrypted."
+                } else {
+                    "Don't enter passwords or payment details on this site."
+                },
+                icon = if (secure) R.drawable.ic_lock else R.drawable.ic_info,
+                tile = if (secure) R.color.tile_green else R.color.tile_red
+            )))
+            if (host != null) {
+                addView(KernelUi.sectionHeader(this@MainActivity, ""))
+                addView(KernelUi.group(this@MainActivity, KernelUi.item(
+                    this@MainActivity,
+                    title = "Clear cookies and site data",
+                    subtitle = "You'll be signed out of $host.",
+                    icon = R.drawable.ic_cookie,
+                    tile = R.color.tile_red,
+                    danger = true
+                ) {
+                    confirmAction("Clear data for $host?", "Cookies, storage, cache, and permissions for this site are removed.", "Clear") {
+                        dialog.dismiss()
+                        clearCurrentSiteData()
+                    }
+                }))
+            }
         }
     }
 
     private fun clearCurrentSiteData() {
         val host = currentHost()
         if (host.isNullOrBlank()) {
-            Toast.makeText(this, "No site data to clear", Toast.LENGTH_SHORT).show()
+            showMessage("No site data to clear")
             return
         }
         runtime.storageController.clearDataFromBaseDomain(host, org.mozilla.geckoview.StorageController.ClearFlags.ALL).accept(
-            { Toast.makeText(this, "Site data cleared for $host", Toast.LENGTH_SHORT).show() },
+            { showMessage("Site data cleared for $host") },
             {
                 SafeLog.warning("Clearing site data failed", it)
-                Toast.makeText(this, "Could not clear site data", Toast.LENGTH_SHORT).show()
+                showMessage("Could not clear site data")
             }
         )
     }
@@ -1550,30 +1745,27 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun startDownload(response: WebResponse) {
-        val uri = response.uri.takeIf { it.isNotBlank() } ?: return
+    private fun startDownload(download: PendingDownload) {
+        if (download.uri.isBlank()) return
         // Android 9 and older need the storage permission at runtime for public Downloads.
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
             checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
         ) {
-            pendingDownloads += response
+            pendingDownloads += download
             if (pendingDownloads.size == 1) {
                 requestPermissions(arrayOf(android.Manifest.permission.WRITE_EXTERNAL_STORAGE), REQUEST_STORAGE_PERMISSION)
             }
             return
         }
-        enqueueDownload(response, publicDownloads = true)
+        enqueueDownload(download, publicDownloads = true)
     }
 
-    private fun enqueueDownload(response: WebResponse, publicDownloads: Boolean) {
-        val uri = response.uri
+    private fun enqueueDownload(download: PendingDownload, publicDownloads: Boolean) {
+        val uri = download.uri
         runCatching {
             val parsedUri = Uri.parse(uri)
-            val filename = android.webkit.URLUtil.guessFileName(
-                uri,
-                response.headers["Content-Disposition"] ?: response.headers["content-disposition"],
-                response.headers["Content-Type"] ?: response.headers["content-type"]
-            ).ifBlank { "kernel-download" }
+            val filename = android.webkit.URLUtil.guessFileName(uri, download.contentDisposition, download.contentType)
+                .ifBlank { "kernel-download" }
             val request = DownloadManager.Request(parsedUri)
                 .setTitle(filename)
                 .setDescription(uri)
@@ -1589,10 +1781,10 @@ class MainActivity : Activity() {
             val downloadManager = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
             val id = downloadManager.enqueue(request)
             downloadStore.record(id, filename, uri, filename)
-            Toast.makeText(this, "Downloading $filename", Toast.LENGTH_SHORT).show()
+            showMessage("Downloading $filename", "View") { showDownloadsSheet() }
         }.getOrElse {
             SafeLog.warning("Download failed", it)
-            Toast.makeText(this, "Could not start download", Toast.LENGTH_SHORT).show()
+            showMessage("Could not start download")
         }
     }
 
@@ -1608,7 +1800,7 @@ class MainActivity : Activity() {
             pendingFileResult?.complete(prompt.dismiss())
             pendingFilePrompt = null
             pendingFileResult = null
-            Toast.makeText(this, "No file picker available", Toast.LENGTH_SHORT).show()
+            showMessage("No file picker available")
         }
     }
 
@@ -1719,6 +1911,7 @@ class MainActivity : Activity() {
         if (fullScreen) {
             if (session != tabs.activeTab?.session) return
             fullScreenSession = session
+            binding.geckoView.pullEnabled = false
             cancelChromeAutoHide()
             hideAddressSuggestions()
             binding.bottomChrome.animate().cancel()
@@ -1730,6 +1923,7 @@ class MainActivity : Activity() {
         } else {
             if (fullScreenSession == null) return
             fullScreenSession = null
+            binding.geckoView.pullEnabled = true
             requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
             setImmersiveBars(false)
             binding.bottomChrome.visibility = View.VISIBLE
@@ -1777,7 +1971,7 @@ class MainActivity : Activity() {
         if (tab == tabs.activeTab) {
             markExtensionActiveTab(tab.session)
             if (tab.url.isBlank()) openHome(tab) else tab.session.loadUri(tab.url)
-            message?.let { Toast.makeText(this, it, Toast.LENGTH_SHORT).show() }
+            message?.let { showMessage(it) }
         }
     }
 
@@ -1801,7 +1995,7 @@ class MainActivity : Activity() {
             putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("application/x-xpinstall", "application/zip", "application/octet-stream"))
         }
         runCatching { startActivityForResult(intent, REQUEST_EXTENSION_FILE) }.getOrElse {
-            Toast.makeText(this, "No file picker available", Toast.LENGTH_SHORT).show()
+            showMessage("No file picker available")
         }
     }
 
@@ -1820,7 +2014,7 @@ class MainActivity : Activity() {
             }.getOrNull()
             runOnUiThread {
                 if (copied == null) {
-                    Toast.makeText(this, "Could not read that file", Toast.LENGTH_SHORT).show()
+                    showMessage("Could not read that file")
                 } else {
                     extensionManager.install(Uri.fromFile(copied).toString(), WebExtensionController.INSTALLATION_METHOD_FROM_FILE)
                 }
@@ -1867,6 +2061,7 @@ class MainActivity : Activity() {
         override fun openUrlInNewTab(url: String) = openInNewTab(url)
 
         override fun showMessage(message: String) {
+            // Install results often land while an extension sheet is open, above the snackbar.
             Toast.makeText(this@MainActivity, message, Toast.LENGTH_SHORT).show()
         }
 
@@ -1882,26 +2077,16 @@ class MainActivity : Activity() {
             SessionStore.Entry(
                 title = tab.title,
                 url = tab.url.ifBlank { StartPage.SESSION_URL },
-                state = if (tab.url.isBlank()) "" else tab.sessionState
+                // State captured for an earlier page (e.g. a background tab's initial about:blank)
+                // would restore the wrong page; fall back to loading the URL.
+                state = if (tab.url.isBlank() || tab.sessionStateUrl != tab.url) "" else tab.sessionState
             )
         })
     }
 
-    private fun actionRow(left: View, right: View): LinearLayout {
-        return LinearLayout(this).apply {
-            gravity = Gravity.CENTER
-            orientation = LinearLayout.HORIZONTAL
-            addView(left, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                marginEnd = ChromeSheet.dp(this@MainActivity, 6)
-            })
-            addView(right, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                marginStart = ChromeSheet.dp(this@MainActivity, 6)
-            })
-        }
-    }
-
     private fun recordHistory(tab: BrowserTab) {
         if (tab.isPrivate || tab.url.isBlank() || isHomeUrl(tab.url)) return
+        if (!tab.url.startsWith("https://") && !tab.url.startsWith("http://")) return
         val title = tab.title.ifBlank { tab.url }
         historyStore.record(title, tab.url)
     }
@@ -1917,7 +2102,21 @@ class MainActivity : Activity() {
 
     private fun showTabsDialog() {
         cancelChromeAutoHide()
-        tabs.activeTab?.let { captureThumbnail(it) }
+        if (tabSwitcherPending) return
+        tabSwitcherPending = true
+        // Open with a fresh snapshot of the current page, but never wait long for it.
+        var opened = false
+        val open = Runnable {
+            if (opened || isFinishing) return@Runnable
+            opened = true
+            tabSwitcherPending = false
+            openTabSwitcher()
+        }
+        tabs.activeTab?.let { tab -> captureThumbnail(tab) { chromeHandler.post(open) } } ?: chromeHandler.post(open)
+        chromeHandler.postDelayed(open, THUMBNAIL_WAIT_MS)
+    }
+
+    private fun openTabSwitcher() {
         TabSwitcherDialogController(
             context = this,
             tabs = tabs,
@@ -1926,12 +2125,7 @@ class MainActivity : Activity() {
                 attachTab(tab)
                 setChromeVisible(true)
             },
-            createTab = { mode ->
-                val tab = tabs.create(mode)
-                attachTab(tab)
-                openHome(tab)
-                setChromeVisible(true)
-            },
+            createTab = { mode -> openNewTab(mode) },
             closeTab = { tab ->
                 rememberClosedTab(tab)
                 tabThumbnails.remove(tab.id)
@@ -1976,9 +2170,7 @@ class MainActivity : Activity() {
             searchEngine = browserPreferences.searchEngine
         )
         tab.url = ""
-        if (tab == tabs.activeTab && !binding.addressBar.hasFocus()) {
-            binding.addressBar.setText("")
-        }
+        if (tab == tabs.activeTab) refreshAddressText()
         tab.session.loadUri(StartPage.dataUri(html))
     }
 
@@ -1997,7 +2189,12 @@ class MainActivity : Activity() {
         tabs.select(tab.id)
         markExtensionActiveTab(tab.session)
         binding.geckoView.setSession(tab.session)
-        binding.addressBar.setText(tab.url)
+        if (binding.addressBar.hasFocus()) {
+            binding.addressBar.clearFocus()
+            hideKeyboard(binding.addressBar)
+        }
+        if (findActive) hideFindBar()
+        refreshAddressText()
         updatePrivateWindowProtection(tab)
         updateKeepScreenOn()
         updateUi()
@@ -2019,58 +2216,491 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun captureThumbnail(tab: BrowserTab) {
-        if (tab.session != tabs.activeTab?.session || binding.geckoView.width <= 0 || binding.geckoView.height <= 0) return
+    /**
+     * Snapshots the visible page for the tab switcher. Old thumbnails are dropped, not recycled:
+     * an open switcher may still be drawing one, and recycling it there crashes the app.
+     */
+    private fun captureThumbnail(tab: BrowserTab, onDone: (() -> Unit)? = null) {
+        if (tab.session != tabs.activeTab?.session || binding.geckoView.width <= 0 || binding.geckoView.height <= 0) {
+            onDone?.invoke()
+            return
+        }
         binding.geckoView.capturePixels().accept({ bitmap ->
-            val source = bitmap ?: return@accept
-            val targetSize = ChromeSheet.dp(this, 240).coerceAtLeast(1)
-            val scaled = Bitmap.createScaledBitmap(source, targetSize, targetSize, true)
-            tabThumbnails.remove(tab.id)?.recycle()
-            tabThumbnails[tab.id] = scaled
-            if (source !== scaled) {
-                source.recycle()
+            if (bitmap != null) {
+                val targetSize = ChromeSheet.dp(this, 240).coerceAtLeast(1)
+                val scaled = Bitmap.createScaledBitmap(bitmap, targetSize, targetSize, true)
+                tabThumbnails[tab.id] = scaled
+                if (bitmap !== scaled) bitmap.recycle()
             }
+            onDone?.invoke()
         }, {
             // Thumbnails are best-effort; browsing should never wait on capture.
+            onDone?.invoke()
         })
     }
 
     private fun updateUi() {
         val tab = tabs.activeTab
-        binding.backButton.isEnabled = tab?.canGoBack == true
+        binding.backButton.isEnabled = tab?.canGoBack == true || (tab != null && parentTabOf(tab) != null)
         binding.forwardButton.isEnabled = tab?.canGoForward == true
         val loading = tab?.isLoading == true
+        val editing = binding.addressBar.hasFocus()
+        val showClear = editing && binding.addressBar.text.isNotEmpty()
         binding.reloadButton.text = ""
+        binding.reloadButton.visibility = if (editing && !showClear) View.GONE else View.VISIBLE
         binding.reloadButton.setCompoundDrawablesWithIntrinsicBounds(
             0,
-            if (loading) R.drawable.ic_close else R.drawable.ic_refresh,
+            if (loading || showClear) R.drawable.ic_close else R.drawable.ic_refresh,
             0,
             0
         )
-        binding.tabsButton.text = tabs.count().toString()
-        binding.extensionsButton.text = extensionActionRegistry.entries()
-            .size
-            .takeIf { it > 0 }
-            ?.toString()
-            .orEmpty()
+        val count = tabs.count()
+        binding.tabsCount.text = if (count > 99) "∞" else count.toString()
+        binding.extensionsButton.text = ""
         binding.backButton.contentDescription = getString(R.string.action_back)
         binding.forwardButton.contentDescription = getString(R.string.action_forward)
-        binding.reloadButton.contentDescription = if (loading) {
-            getString(R.string.action_stop)
-        } else {
-            getString(R.string.action_reload)
+        binding.reloadButton.contentDescription = when {
+            showClear -> getString(R.string.action_clear)
+            loading -> getString(R.string.action_stop)
+            else -> getString(R.string.action_reload)
         }
         binding.homeButton.contentDescription = getString(R.string.action_home)
         binding.tabsButton.contentDescription = "${tabs.count()} tabs"
-        binding.extensionsButton.contentDescription = "${extensionActionRegistry.entries().size} extensions"
-        binding.settingsButton.contentDescription = getString(R.string.action_settings)
+        binding.settingsButton.contentDescription = getString(R.string.action_menu)
+        val blank = tab?.url.isNullOrBlank()
+        val secure = tab?.isSecure == true
+        val private = tab?.isPrivate == true
+        if (binding.addressPill.tag != private) {
+            binding.addressPill.tag = private
+            binding.addressPill.setBackgroundResource(
+                if (private) R.drawable.address_bar_private_background else R.drawable.address_bar_background
+            )
+            binding.addressBar.setHint(if (private) R.string.address_hint_private else R.string.address_hint)
+        }
+        binding.securityIcon.setImageResource(when {
+            private && blank -> R.drawable.ic_private
+            editing || blank -> R.drawable.ic_search
+            secure -> R.drawable.ic_lock
+            tab?.url?.startsWith("http://") == true -> R.drawable.ic_info
+            else -> R.drawable.ic_globe
+        })
         binding.securityIcon.imageTintList = ColorStateList.valueOf(
-            getColor(if (tab?.isSecure == true) R.color.kernel_accent else R.color.kernel_muted)
+            getColor(if (!editing && !blank && !secure && tab?.url?.startsWith("http://") == true) R.color.kernel_danger else R.color.kernel_muted)
         )
-        binding.securityIcon.contentDescription = securitySummary(tab)
-        binding.progressBar.visibility = if (loading && fullScreenSession == null) View.VISIBLE else View.GONE
-        binding.progressBar.progress = tab?.progress ?: 0
+        binding.securityIcon.contentDescription = if (editing || blank) getString(R.string.address_hint) else "Site info: ${securitySummary(tab)}"
+        binding.extensionsButton.contentDescription = getString(R.string.action_extensions)
+        binding.progressBar.visibility = if (loading && !editing && fullScreenSession == null) View.VISIBLE else View.GONE
+        binding.progressBar.progress = (tab?.progress ?: 0).coerceAtLeast(5)
         title = tab?.title?.takeIf { it.isNotBlank() } ?: getString(R.string.app_name)
+    }
+
+    private fun setAddressText(text: String) {
+        settingAddressText = true
+        binding.addressBar.setText(text)
+        settingAddressText = false
+    }
+
+    /** Shows the active tab's short form (host or search terms) unless the user is editing. */
+    private fun refreshAddressText() {
+        if (binding.addressBar.hasFocus()) return
+        val url = tabs.activeTab?.url.orEmpty()
+        setAddressText(AddressDisplay.format(url, browserPreferences.searchEngine))
+    }
+
+    private fun hideKeyboard(view: View) {
+        (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
+            .hideSoftInputFromWindow(view.windowToken, 0)
+    }
+
+    private fun focusAddressBar() {
+        setChromeVisible(true)
+        binding.addressBar.requestFocus()
+        binding.addressBar.post {
+            (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
+                .showSoftInput(binding.addressBar, InputMethodManager.SHOW_IMPLICIT)
+        }
+    }
+
+    /** A fresh tab is for going somewhere, so it opens with the address bar ready to type. */
+    private fun openNewTab(mode: TabMode) {
+        val tab = tabs.create(mode)
+        attachTab(tab)
+        openHome(tab)
+        focusAddressBar()
+    }
+
+    /** Long-press on the tabs button. */
+    private fun showTabShortcuts() {
+        val tab = tabs.activeTab
+        ChromeSheet.show(this, title = "Tabs", subtitle = "${tabs.count()} open") { dialog ->
+            fun run(action: () -> Unit): () -> Unit = {
+                dialog.dismiss()
+                action()
+            }
+            val rows = mutableListOf<View>(
+                KernelUi.item(this@MainActivity, "New tab", icon = R.drawable.ic_add, tile = R.color.tile_blue,
+                    onClick = run { openNewTab(TabMode.NORMAL) }),
+                KernelUi.item(this@MainActivity, "New private tab", icon = R.drawable.ic_private, tile = R.color.tile_indigo,
+                    onClick = run { openNewTab(TabMode.PRIVATE) })
+            )
+            if (tab != null) {
+                rows += KernelUi.item(this@MainActivity, "Close this tab", icon = R.drawable.ic_close, tile = R.color.tile_red,
+                    onClick = run { closeTabWithUndo(tab) })
+            }
+            if (lastClosedNormalTab != null) {
+                rows += KernelUi.item(this@MainActivity, "Reopen closed tab", subtitle = lastClosedNormalTab?.title,
+                    icon = R.drawable.ic_tab_restore, tile = R.color.tile_teal, onClick = run(::undoCloseTab))
+            }
+            addView(KernelUi.group(this@MainActivity, rows))
+        }
+    }
+
+    private fun closeTabWithUndo(tab: BrowserTab) {
+        rememberClosedTab(tab)
+        tabThumbnails.remove(tab.id)
+        tabs.close(tab.id)
+        attachCurrentOrCreate()
+        saveNormalSession()
+        updateUi()
+        if (!tab.isPrivate && tab.url.isNotBlank()) showMessage("Tab closed", "Undo", ::undoCloseTab)
+    }
+
+    /** Swipe the address bar sideways to move between tabs, like Safari. Taps still edit. */
+    @android.annotation.SuppressLint("ClickableViewAccessibility")
+    private fun configureAddressSwipe() {
+        val slop = android.view.ViewConfiguration.get(this).scaledTouchSlop
+        val trigger = ChromeSheet.dp(this, 56)
+        var downX = 0f
+        var downY = 0f
+        var swiping = false
+        binding.addressBar.setOnTouchListener { view, event ->
+            if (binding.addressBar.hasFocus()) return@setOnTouchListener false
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downX = event.rawX
+                    downY = event.rawY
+                    swiping = false
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = event.rawX - downX
+                    if (!swiping && kotlin.math.abs(dx) > slop * 2 && kotlin.math.abs(dx) > kotlin.math.abs(event.rawY - downY) * 2) {
+                        swiping = true
+                        // Stop the EditText from treating this as a tap that focuses it.
+                        view.cancelLongPress()
+                        val cancel = MotionEvent.obtain(event).apply { action = MotionEvent.ACTION_CANCEL }
+                        view.onTouchEvent(cancel)
+                        cancel.recycle()
+                    }
+                    if (swiping) {
+                        binding.addressBar.translationX = dx * 0.35f
+                        binding.addressBar.alpha = 1f - (kotlin.math.abs(dx) / (trigger * 4f)).coerceAtMost(0.5f)
+                        return@setOnTouchListener true
+                    }
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> if (swiping) {
+                    val dx = event.rawX - downX
+                    swiping = false
+                    val switched = event.actionMasked == MotionEvent.ACTION_UP &&
+                        kotlin.math.abs(dx) >= trigger && switchAdjacentTab(if (dx < 0) 1 else -1)
+                    val from = if (switched) -binding.addressBar.translationX else binding.addressBar.translationX
+                    binding.addressBar.translationX = from
+                    binding.addressBar.animate().translationX(0f).alpha(1f).setDuration(220L)
+                        .setInterpolator(chromeInterpolator).start()
+                    return@setOnTouchListener true
+                }
+            }
+            false
+        }
+    }
+
+    /** Moves to the next (+1) or previous (-1) tab of the same kind; false at either end. */
+    private fun switchAdjacentTab(direction: Int): Boolean {
+        val current = tabs.activeTab ?: return false
+        val siblings = tabs.all().filter { it.mode == current.mode }
+        val target = siblings.getOrNull(siblings.indexOf(current) + direction) ?: return false
+        binding.addressBar.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+        attachTab(target)
+        setChromeVisible(true)
+        return true
+    }
+
+    private fun configurePullToRefresh() {
+        val indicator = binding.pullIndicator
+        val size = ChromeSheet.dp(this, 44).toFloat()
+        binding.geckoView.listener = object : PullToRefreshGeckoView.Listener {
+            override fun onPull(distance: Float, armed: Boolean) {
+                if (distance <= 0f) {
+                    indicator.animate().alpha(0f).translationY(-size).setDuration(160L)
+                        .withEndAction { indicator.visibility = View.INVISIBLE }.start()
+                    return
+                }
+                indicator.animate().cancel()
+                indicator.visibility = View.VISIBLE
+                indicator.translationY = topContentInset + distance - size
+                indicator.alpha = (distance / (size * 1.6f)).coerceIn(0f, 1f)
+                indicator.rotation = distance * 2.2f
+                indicator.imageTintList = ColorStateList.valueOf(
+                    getColor(if (armed) R.color.kernel_accent else R.color.kernel_muted)
+                )
+            }
+
+            override fun onRefresh() {
+                val tab = tabs.activeTab ?: return
+                indicator.visibility = View.VISIBLE
+                indicator.alpha = 1f
+                indicator.translationY = topContentInset + ChromeSheet.dp(this@MainActivity, 16).toFloat()
+                indicator.animate().rotationBy(720f).setDuration(700L).setInterpolator(chromeInterpolator)
+                    .withEndAction {
+                        indicator.animate().alpha(0f).translationY(-size).setDuration(200L)
+                            .withEndAction { indicator.visibility = View.INVISIBLE }.start()
+                    }.start()
+                tab.session.reload()
+            }
+        }
+    }
+
+    private fun configureFindBar() {
+        binding.findInput.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                if (findActive) findInPage(backwards = false, fromStart = true)
+            }
+            override fun afterTextChanged(s: Editable?) = Unit
+        })
+        binding.findInput.setOnEditorActionListener { _, _, _ ->
+            findInPage(backwards = false)
+            true
+        }
+        binding.findPrevious.setOnClickListener { findInPage(backwards = true) }
+        binding.findNext.setOnClickListener { findInPage(backwards = false) }
+        binding.findClose.setOnClickListener { hideFindBar() }
+    }
+
+    private fun showFindBar() {
+        if (tabs.activeTab == null) return
+        if (binding.addressBar.hasFocus()) binding.addressBar.clearFocus()
+        findActive = true
+        setChromeVisible(true)
+        binding.addressContainer.visibility = View.GONE
+        binding.bottomBar.visibility = View.GONE
+        binding.findBar.visibility = View.VISIBLE
+        binding.findInput.setText("")
+        binding.findCount.text = ""
+        binding.findInput.requestFocus()
+        binding.findInput.post {
+            (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
+                .showSoftInput(binding.findInput, InputMethodManager.SHOW_IMPLICIT)
+        }
+        binding.bottomChrome.post { updateGeckoChromeInsets() }
+    }
+
+    private fun hideFindBar() {
+        if (!findActive) return
+        findActive = false
+        tabs.activeTab?.session?.finder?.clear()
+        hideKeyboard(binding.findInput)
+        binding.findInput.clearFocus()
+        binding.findBar.visibility = View.GONE
+        binding.addressContainer.visibility = View.VISIBLE
+        binding.bottomBar.visibility = View.VISIBLE
+        binding.bottomChrome.post { updateGeckoChromeInsets() }
+    }
+
+    private fun findInPage(backwards: Boolean, fromStart: Boolean = false) {
+        val query = binding.findInput.text.toString()
+        val finder = tabs.activeTab?.session?.finder ?: return
+        if (query.isEmpty()) {
+            finder.clear()
+            binding.findCount.text = ""
+            return
+        }
+        finder.displayFlags = GeckoSession.FINDER_DISPLAY_HIGHLIGHT_ALL
+        // A null search string repeats the last search in the given direction.
+        val flags = if (backwards) GeckoSession.FINDER_FIND_BACKWARDS else 0
+        finder.find(if (fromStart) query else null, flags).accept({ result ->
+            if (!findActive || result == null || binding.findInput.text.toString() != query) return@accept
+            binding.findCount.text = when {
+                !result.found -> "0/0"
+                result.total > 0 -> "${result.current}/${result.total}"
+                else -> ""
+            }
+            binding.findCount.setTextColor(getColor(if (result.found) R.color.kernel_muted else R.color.kernel_danger))
+        }, { })
+    }
+
+    private fun isInitialBlank(tab: BrowserTab, url: String?): Boolean =
+        url.equals("about:blank", ignoreCase = true) && tab.url.isNotBlank()
+
+    private fun showMessage(message: String, action: String? = null, onAction: (() -> Unit)? = null) {
+        snackbar.show(message, action, onAction = onAction)
+    }
+
+    /** Keeps messages just above the toolbar, or above the system bar when the toolbar is hidden. */
+    private fun snackbarOffset(): Int {
+        val params = binding.bottomChrome.layoutParams as FrameLayout.LayoutParams
+        return if (chromeHidden || binding.bottomChrome.visibility != View.VISIBLE) {
+            bottomInset
+        } else {
+            params.bottomMargin + binding.bottomChrome.height
+        }
+    }
+
+    /** tel:, mailto:, intent:// and other app links: hand them to Android instead of failing silently. */
+    private fun openExternally(tab: BrowserTab, uri: String, userInitiated: Boolean) {
+        val intent = runCatching {
+            if (uri.startsWith("intent:", ignoreCase = true)) {
+                Intent.parseUri(uri, Intent.URI_INTENT_SCHEME).apply {
+                    // A page must not be able to target private components of other apps.
+                    component = null
+                    selector = null
+                    addCategory(Intent.CATEGORY_BROWSABLE)
+                }
+            } else {
+                Intent(Intent.ACTION_VIEW, Uri.parse(uri)).addCategory(Intent.CATEGORY_BROWSABLE)
+            }
+        }.getOrNull()?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+
+        val handler = intent?.resolveActivity(packageManager)
+        if (intent == null || handler == null) {
+            val fallback = ExternalLinks.fallbackUrl(uri)
+            when {
+                fallback != null -> tab.session.loadUri(fallback)
+                intent?.`package` != null && userInitiated -> showMessage("App not installed", "Get it") {
+                    launchExternal(Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=${intent.`package`}")))
+                }
+                userInitiated -> showMessage("No app can open this link")
+            }
+            return
+        }
+        // Only a tap on a phone/mail/maps link opens straight away; anything a page triggers on
+        // its own (redirects, scripts) or any other app needs the user's tap on the message.
+        if (userInitiated && ExternalLinks.classify(uri) == ExternalLinks.Kind.DIRECT) {
+            launchExternal(intent)
+        } else {
+            val appName = runCatching {
+                packageManager.getActivityInfo(handler, 0).loadLabel(packageManager).toString()
+            }.getOrNull()?.takeIf { it.isNotBlank() }
+            showMessage(if (appName != null) "Open in $appName?" else "Open in app?", "Open") { launchExternal(intent) }
+        }
+    }
+
+    private fun launchExternal(intent: Intent) {
+        runCatching { startActivity(intent) }.getOrElse { showMessage("No app can open this link") }
+    }
+
+    /** Long-press on a link, image, or video. */
+    private fun showContextMenu(tab: BrowserTab, element: GeckoSession.ContentDelegate.ContextElement) {
+        val link = element.linkUri?.takeIf { it.isNotBlank() && !it.startsWith("javascript:", ignoreCase = true) }
+        val media = element.srcUri?.takeIf { it.isNotBlank() && element.type != GeckoSession.ContentDelegate.ContextElement.TYPE_NONE }
+        if (link == null && media == null) return
+        binding.geckoView.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+        val isImage = element.type == GeckoSession.ContentDelegate.ContextElement.TYPE_IMAGE
+        val title = element.linkText?.trim()?.takeIf { it.isNotBlank() }
+            ?: element.title?.trim()?.takeIf { it.isNotBlank() }
+            ?: element.altText?.trim()?.takeIf { it.isNotBlank() }
+            ?: link ?: media!!
+        ChromeSheet.show(this, title = title.take(200), subtitle = (link ?: media)?.let(::readableUrl), compactTitle = true) { dialog ->
+            fun run(action: () -> Unit): () -> Unit = {
+                dialog.dismiss()
+                action()
+            }
+            if (link != null) {
+                val linkIsWeb = ExternalLinks.classify(link) == ExternalLinks.Kind.WEB
+                val rows = mutableListOf<View>()
+                if (linkIsWeb) {
+                    rows += KernelUi.item(this@MainActivity, "Open in new tab", icon = R.drawable.ic_add, tile = R.color.tile_blue,
+                        onClick = run { openChildTab(tab, link, background = false) })
+                    rows += KernelUi.item(this@MainActivity, "Open in background", icon = R.drawable.ic_tabs, tile = R.color.tile_teal,
+                        onClick = run { openChildTab(tab, link, background = true) })
+                    if (!tab.isPrivate) {
+                        rows += KernelUi.item(this@MainActivity, "Open in private tab", icon = R.drawable.ic_private, tile = R.color.tile_indigo,
+                            onClick = run { openInTab(link, TabMode.PRIVATE) })
+                    }
+                }
+                rows += KernelUi.item(this@MainActivity, "Copy link", icon = R.drawable.ic_link, tile = R.color.tile_gray,
+                    onClick = run { copyText("Link", link, "Link copied") })
+                rows += KernelUi.item(this@MainActivity, "Share link", icon = R.drawable.ic_share, tile = R.color.tile_green,
+                    onClick = run { shareText(element.linkText?.trim().orEmpty(), link) })
+                if (linkIsWeb) {
+                    rows += KernelUi.item(this@MainActivity, "Download link", icon = R.drawable.ic_download, tile = R.color.tile_orange,
+                        onClick = run { startDownload(PendingDownload(link, null, null)) })
+                }
+                addView(KernelUi.group(this@MainActivity, rows))
+            }
+            if (media != null) {
+                val noun = when (element.type) {
+                    GeckoSession.ContentDelegate.ContextElement.TYPE_IMAGE -> "image"
+                    GeckoSession.ContentDelegate.ContextElement.TYPE_VIDEO -> "video"
+                    else -> "audio"
+                }
+                if (link != null) addView(KernelUi.sectionHeader(this@MainActivity, noun.replaceFirstChar { it.uppercase() }))
+                val rows = mutableListOf<View>()
+                val mediaIsWeb = media.startsWith("http://", true) || media.startsWith("https://", true)
+                if (mediaIsWeb) {
+                    rows += KernelUi.item(this@MainActivity, "Open $noun in new tab", icon = R.drawable.ic_add, tile = R.color.tile_blue,
+                        onClick = run { openChildTab(tab, media, background = false) })
+                    rows += KernelUi.item(this@MainActivity, "Save $noun", icon = R.drawable.ic_download, tile = R.color.tile_orange,
+                        onClick = run { startDownload(PendingDownload(media, null, null)) })
+                }
+                rows += KernelUi.item(this@MainActivity, "Copy $noun link", icon = R.drawable.ic_link, tile = R.color.tile_gray,
+                    onClick = run { copyText("Link", media, "Link copied") })
+                if (isImage && mediaIsWeb) {
+                    rows += KernelUi.item(this@MainActivity, "Share $noun link", icon = R.drawable.ic_share, tile = R.color.tile_green,
+                        onClick = run { shareText(element.altText.orEmpty(), media) })
+                }
+                addView(KernelUi.group(this@MainActivity, rows))
+            }
+        }
+    }
+
+    /** A URL without its scheme and www., decoded, for showing to people. */
+    private fun readableUrl(url: String): String {
+        val trimmed = url.replaceFirst(Regex("^https?://(www\\.)?", RegexOption.IGNORE_CASE), "")
+        return runCatching { Uri.decode(trimmed) }.getOrDefault(trimmed).take(300)
+    }
+
+    /** Opens [url] in a tab the current one is the parent of, so Back from it comes home. */
+    private fun openChildTab(parent: BrowserTab, url: String, background: Boolean) {
+        val previous = tabs.activeTab
+        previous?.let(::captureThumbnail)
+        val child = tabs.create(parent.mode)
+        child.parentId = parent.id
+        child.url = url
+        if (background && previous != null) {
+            // tabs.create() made the new tab active; keep showing the page the user is reading.
+            tabs.select(previous.id)
+            child.session.loadUri(url)
+            updateUi()
+            saveNormalSession()
+            showMessage("Opened in background", "Switch") { attachTab(child) }
+        } else {
+            attachTab(child)
+            child.session.loadUri(url)
+            setChromeVisible(true)
+        }
+    }
+
+    private fun openInTab(url: String, mode: TabMode) {
+        val tab = tabs.create(mode)
+        attachTab(tab)
+        tab.session.loadUri(url)
+        setChromeVisible(true)
+    }
+
+    private fun copyText(label: String, text: String, confirmation: String) {
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText(label, text))
+        // Android 13+ shows its own clipboard confirmation.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) showMessage(confirmation)
+    }
+
+    private fun shareText(subject: String, text: String) {
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            if (subject.isNotBlank()) putExtra(Intent.EXTRA_SUBJECT, subject)
+            putExtra(Intent.EXTRA_TEXT, text)
+        }
+        runCatching { startActivity(Intent.createChooser(intent, "Share")) }
     }
 
     private companion object {
@@ -2080,5 +2710,7 @@ class MainActivity : Activity() {
         const val REQUEST_STORAGE_PERMISSION = 44
         const val SESSION_SAVE_DELAY_MS = 1_500L
         const val SUGGESTION_DEBOUNCE_MS = 150L
+        const val SUGGESTION_ROW_DP = 54
+        const val THUMBNAIL_WAIT_MS = 300L
     }
 }

@@ -17,6 +17,12 @@ class BrowserTab(
     var securityHost: String = ""
     var sessionState: String = ""
 
+    /** The [url] the tab was on when [sessionState] was captured. */
+    var sessionStateUrl: String = ""
+
+    /** The tab that opened this one (window.open, target=_blank); Back returns there. */
+    var parentId: Long? = null
+
     val isPrivate: Boolean
         get() = mode == TabMode.PRIVATE
 

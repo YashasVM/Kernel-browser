@@ -23,6 +23,8 @@ object ChromeSheet {
         title: String,
         subtitle: String? = null,
         scrollable: Boolean = true,
+        showDone: Boolean = true,
+        compactTitle: Boolean = false,
         builder: LinearLayout.(Dialog) -> Unit
     ): Dialog {
         val dialog = Dialog(context)
@@ -44,7 +46,7 @@ object ChromeSheet {
             }
         })
 
-        sheet.addView(header(context, title, subtitle) { dialog.dismiss() })
+        sheet.addView(header(context, title, subtitle, showDone, compactTitle) { dialog.dismiss() })
 
         val content = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -93,16 +95,6 @@ object ChromeSheet {
         return dialog
     }
 
-    fun sectionLabel(context: Context, text: String): TextView {
-        return TextView(context).apply {
-            this.text = text.uppercase()
-            textSize = 12f
-            setTextColor(context.getColor(R.color.kernel_muted))
-            letterSpacing = 0.08f
-            setPadding(dp(context, 2), dp(context, 18), dp(context, 2), dp(context, 8))
-        }
-    }
-
     fun note(context: Context, text: String): TextView {
         return TextView(context).apply {
             this.text = text
@@ -120,65 +112,15 @@ object ChromeSheet {
         }
     }
 
-    fun statusPill(context: Context, text: String, accent: Boolean = false): TextView {
+    /** The main text of a prompt: page-supplied, so plain, readable, and selectable. */
+    fun message(context: Context, text: String): TextView {
         return TextView(context).apply {
             this.text = text
-            gravity = Gravity.CENTER
-            minHeight = dp(context, 32)
-            textSize = 12f
-            typeface = android.graphics.Typeface.DEFAULT_BOLD
-            setTextColor(context.getColor(if (accent) R.color.kernel_accent else R.color.kernel_muted))
-            setPadding(dp(context, 10), 0, dp(context, 10), 0)
-        }
-    }
-
-    fun row(
-        context: Context,
-        title: String,
-        subtitle: String? = null,
-        trailing: View? = null,
-        onClick: (() -> Unit)? = null
-    ): LinearLayout {
-        return LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            minimumHeight = dp(context, 64)
-            setPadding(dp(context, 16), dp(context, 13), dp(context, 12), dp(context, 13))
-            setBackgroundResource(R.drawable.sheet_row_background)
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply {
-                bottomMargin = dp(context, 8)
-            }
-            if (onClick != null) {
-                isClickable = true
-                isFocusable = true
-                setOnClickListener { onClick() }
-            }
-
-            addView(LinearLayout(context).apply {
-                orientation = LinearLayout.VERTICAL
-                addView(TextView(context).apply {
-                    text = title
-                    textSize = 16f
-                    setTextColor(context.getColor(R.color.kernel_text))
-                    typeface = android.graphics.Typeface.DEFAULT_BOLD
-                })
-                if (!subtitle.isNullOrBlank()) {
-                    addView(TextView(context).apply {
-                        text = subtitle
-                        textSize = 13f
-                        setLineSpacing(dp(context, 1).toFloat(), 1f)
-                        setTextColor(context.getColor(R.color.kernel_muted))
-                        setPadding(0, dp(context, 3), dp(context, 8), 0)
-                    })
-                }
-            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-
-            trailing?.let {
-                addView(it)
-            }
+            textSize = 16f
+            setLineSpacing(dp(context, 3).toFloat(), 1f)
+            setTextColor(context.getColor(R.color.kernel_text))
+            setTextIsSelectable(true)
+            setPadding(dp(context, 2), 0, dp(context, 2), dp(context, 14))
         }
     }
 
@@ -213,6 +155,8 @@ object ChromeSheet {
         context: Context,
         title: String,
         subtitle: String?,
+        showDone: Boolean,
+        compactTitle: Boolean,
         onDone: () -> Unit
     ): LinearLayout {
         return LinearLayout(context).apply {
@@ -224,7 +168,12 @@ object ChromeSheet {
                 orientation = LinearLayout.VERTICAL
                 addView(TextView(context).apply {
                     text = title
-                    textSize = 26f
+                    // Titles that come from page content (link text, prompts) stay small and short.
+                    textSize = if (compactTitle) 20f else 26f
+                    if (compactTitle) {
+                        maxLines = 2
+                        ellipsize = android.text.TextUtils.TruncateAt.END
+                    }
                     setTextColor(context.getColor(R.color.kernel_text))
                     typeface = android.graphics.Typeface.DEFAULT_BOLD
                 })
@@ -234,11 +183,15 @@ object ChromeSheet {
                         textSize = 14f
                         setTextColor(context.getColor(R.color.kernel_muted))
                         setPadding(0, dp(context, 2), dp(context, 12), 0)
+                        if (compactTitle) {
+                            maxLines = 2
+                            ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+                        }
                     })
                 }
             }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
 
-            addView(TextView(context).apply {
+            if (showDone) addView(TextView(context).apply {
                 text = "Done"
                 gravity = Gravity.CENTER
                 minWidth = dp(context, 58)
@@ -248,6 +201,40 @@ object ChromeSheet {
                 isClickable = true
                 isFocusable = true
                 setOnClickListener { onDone() }
+            })
+        }
+    }
+
+    /** A rounded single-line input that matches the sheet rows. */
+    fun textField(context: Context, hint: String, value: String? = null, password: Boolean = false): android.widget.EditText {
+        return android.widget.EditText(context).apply {
+            this.hint = hint
+            setText(value.orEmpty())
+            setSingleLine(true)
+            textSize = 16f
+            setTextColor(context.getColor(R.color.kernel_text))
+            setHintTextColor(context.getColor(R.color.kernel_disabled))
+            setBackgroundResource(R.drawable.sheet_row_background)
+            setPadding(dp(context, 16), 0, dp(context, 16), 0)
+            if (password) {
+                inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+            }
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(context, 52)).apply {
+                bottomMargin = dp(context, 10)
+            }
+        }
+    }
+
+    /** Two equal-width buttons side by side, e.g. Cancel / OK. */
+    fun buttonRow(context: Context, left: View, right: View): LinearLayout {
+        return LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(context, 8), 0, 0)
+            addView(left, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginEnd = dp(context, 6)
+            })
+            addView(right, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginStart = dp(context, 6)
             })
         }
     }

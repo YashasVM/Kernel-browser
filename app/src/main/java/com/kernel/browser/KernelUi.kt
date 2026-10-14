@@ -92,6 +92,40 @@ object KernelUi {
         }
     }
 
+    /** A colored tile with the first letter of [label], for sites that have no icon of their own. */
+    fun letterTile(context: Context, label: String, key: String = label): TextView {
+        val palette = intArrayOf(R.color.tile_blue, R.color.tile_red, R.color.tile_green, R.color.tile_purple,
+            R.color.tile_orange, R.color.tile_teal, R.color.tile_pink, R.color.tile_indigo)
+        val letter = label.firstOrNull { it.isLetterOrDigit() }?.uppercaseChar()?.toString() ?: "?"
+        return TextView(context).apply {
+            text = letter
+            gravity = Gravity.CENTER
+            textSize = 15f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(context.getColor(android.R.color.white))
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            background = GradientDrawable().apply {
+                setColor(context.getColor(palette[(key.hashCode() and 0x7fffffff) % palette.size]))
+                cornerRadius = dp(context, 9).toFloat()
+            }
+        }
+    }
+
+    /** A 48dp "more" button for a row's secondary actions. */
+    fun moreButton(context: Context, description: String, onClick: () -> Unit): ImageView {
+        return ImageView(context).apply {
+            setImageResource(R.drawable.ic_more)
+            imageTintList = ColorStateList.valueOf(context.getColor(R.color.kernel_muted))
+            scaleType = ImageView.ScaleType.CENTER
+            background = selectableItemBackground(context)
+            contentDescription = description
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { onClick() }
+            layoutParams = LinearLayout.LayoutParams(dp(context, 44), dp(context, 44))
+        }
+    }
+
     fun bitmapTile(context: Context, bitmap: Bitmap?, fallbackIcon: Int, colorRes: Int): View {
         if (bitmap == null) return iconTile(context, fallbackIcon, colorRes)
         return ImageView(context).apply {

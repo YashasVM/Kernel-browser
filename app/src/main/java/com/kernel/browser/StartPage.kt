@@ -43,7 +43,8 @@ object StartPage {
     }
 
     /** The URL to show/store for a tab: empty while the start page is showing. */
-    fun displayUrl(url: String?): String = if (isStartPageUrl(url)) "" else url.orEmpty()
+    fun displayUrl(url: String?): String =
+        if (isStartPageUrl(url) || url.equals("about:blank", ignoreCase = true)) "" else url.orEmpty()
 
     /** Most-visited hosts from (most-recent-first) history, deduped by host, http/https only. */
     fun topSites(history: List<Pair<String, String>>, max: Int = MAX_TOP_SITES): List<Site> {
