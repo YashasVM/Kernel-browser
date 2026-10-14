@@ -2262,7 +2262,16 @@ class MainActivity : Activity() {
         binding.settingsButton.contentDescription = getString(R.string.action_menu)
         val blank = tab?.url.isNullOrBlank()
         val secure = tab?.isSecure == true
+        val private = tab?.isPrivate == true
+        if (binding.addressPill.tag != private) {
+            binding.addressPill.tag = private
+            binding.addressPill.setBackgroundResource(
+                if (private) R.drawable.address_bar_private_background else R.drawable.address_bar_background
+            )
+            binding.addressBar.setHint(if (private) R.string.address_hint_private else R.string.address_hint)
+        }
         binding.securityIcon.setImageResource(when {
+            private && blank -> R.drawable.ic_private
             editing || blank -> R.drawable.ic_search
             secure -> R.drawable.ic_lock
             tab?.url?.startsWith("http://") == true -> R.drawable.ic_info

@@ -15,6 +15,8 @@
     <color name="kernel_disabled">#70747C</color>
     <color name="kernel_scrim">#99000000</color>
     <color name="kernel_on_accent">#0B1B33</color>
+    <color name="kernel_private_surface">#FF3A3156</color>
+    <color name="kernel_private_border">#FF6B5BB5</color>
     <color name="kernel_snackbar">#3A3C42</color>
     <color name="kernel_divider">#3F4247</color>
     <color name="kernel_group">#2C2D31</color>

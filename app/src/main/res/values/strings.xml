@@ -2,6 +2,7 @@
     <string name="app_name">Kernel Browser</string>
     <string name="home_url">https://www.google.com</string>
     <string name="address_hint">Search or enter address</string>
+    <string name="address_hint_private">Search privately</string>
     <string name="action_back">Back</string>
     <string name="action_forward">Forward</string>
     <string name="action_reload">Reload</string>
