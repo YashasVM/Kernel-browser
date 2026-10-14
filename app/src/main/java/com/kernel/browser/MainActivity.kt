@@ -1167,6 +1167,7 @@ class MainActivity : Activity() {
                     binding.bottomChrome.visibility = View.INVISIBLE
                 }
                 updateGeckoChromeInsets()
+                snackbar.reposition()
                 if (visible) scheduleChromeAutoHide()
             }
             .start()
@@ -2380,7 +2381,9 @@ class MainActivity : Activity() {
                         swiping = true
                         // Stop the EditText from treating this as a tap that focuses it.
                         view.cancelLongPress()
-                        view.onTouchEvent(MotionEvent.obtain(event).apply { action = MotionEvent.ACTION_CANCEL })
+                        val cancel = MotionEvent.obtain(event).apply { action = MotionEvent.ACTION_CANCEL }
+                        view.onTouchEvent(cancel)
+                        cancel.recycle()
                     }
                     if (swiping) {
                         binding.addressBar.translationX = dx * 0.35f
@@ -2563,8 +2566,9 @@ class MainActivity : Activity() {
             }
             return
         }
-        if (!userInitiated) return
-        if (ExternalLinks.classify(uri) == ExternalLinks.Kind.DIRECT) {
+        // Only a tap on a phone/mail/maps link opens straight away; anything a page triggers on
+        // its own (redirects, scripts) or any other app needs the user's tap on the message.
+        if (userInitiated && ExternalLinks.classify(uri) == ExternalLinks.Kind.DIRECT) {
             launchExternal(intent)
         } else {
             val appName = runCatching {
