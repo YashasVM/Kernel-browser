@@ -17,6 +17,13 @@ class BrowserPreferences(context: Context) {
             preferences.edit().putString(KEY_HOMEPAGE_URL, UrlNormalizer.normalize(value)).apply()
         }
 
+    /** Show the native start page for new tabs and Home instead of loading [homepageUrl]. */
+    var newTabPage: Boolean
+        get() = preferences.getBoolean(KEY_NEW_TAB_PAGE, true)
+        set(value) {
+            preferences.edit().putBoolean(KEY_NEW_TAB_PAGE, value).apply()
+        }
+
     var desktopMode: Boolean
         get() = preferences.getBoolean(KEY_DESKTOP_MODE, false)
         set(value) {
@@ -70,6 +77,7 @@ class BrowserPreferences(context: Context) {
         const val DEFAULT_HOMEPAGE = "https://www.google.com"
         private const val KEY_SEARCH_ENGINE = "search_engine"
         private const val KEY_HOMEPAGE_URL = "homepage_url"
+        private const val KEY_NEW_TAB_PAGE = "new_tab_page"
         private const val KEY_DESKTOP_MODE = "desktop_mode"
         private const val KEY_TRACKING_PROTECTION = "tracking_protection"
         private const val KEY_BLOCK_THIRD_PARTY_COOKIES = "block_third_party_cookies"

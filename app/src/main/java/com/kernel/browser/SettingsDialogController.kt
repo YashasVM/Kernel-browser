@@ -191,6 +191,11 @@ class SettingsDialogController(
                 value = browserPreferences.searchEngine.displayName, chevron = true) { push(searchEnginePage()) },
             KernelUi.item(context, "Homepage", icon = R.drawable.ic_home, tile = R.color.tile_green,
                 value = displayHost(browserPreferences.homepageUrl), chevron = true) { push(homepagePage()) },
+            KernelUi.toggle(context, "Start page", subtitle = "Show top sites and bookmarks in new tabs and on Home.",
+                icon = R.drawable.ic_tabs, tile = R.color.tile_teal, checked = browserPreferences.newTabPage) {
+                browserPreferences.newTabPage = it
+                onPreferencesChanged()
+            },
             KernelUi.toggle(context, "Desktop site", subtitle = "Request full desktop pages by default.",
                 icon = R.drawable.ic_desktop, tile = R.color.tile_indigo, checked = browserPreferences.desktopMode) {
                 browserPreferences.desktopMode = it

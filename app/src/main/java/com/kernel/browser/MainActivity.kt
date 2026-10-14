@@ -218,12 +218,12 @@ class MainActivity : Activity() {
         if (openIntentUri(intent)) return
 
         val restoredTabs = sessionStore.restore().ifEmpty {
-            listOf(SessionStore.Entry("Home", browserPreferences.homepageUrl, ""))
+            listOf(SessionStore.Entry("Home", StartPage.SESSION_URL, ""))
         }
         restoredTabs.forEachIndexed { index, entry ->
             val tab = tabs.create(TabMode.NORMAL)
             tab.title = entry.title
-            tab.url = entry.url
+            tab.url = entry.url.takeUnless { it == StartPage.SESSION_URL }.orEmpty()
             if (index == restoredTabs.lastIndex) {
                 attachTab(tab)
             }
@@ -236,6 +236,8 @@ class MainActivity : Activity() {
                 }.getOrElse {
                     tab.session.loadUri(entry.url.ifBlank { browserPreferences.homepageUrl })
                 }
+            } else if (entry.url == StartPage.SESSION_URL) {
+                openHome(tab)
             } else {
                 tab.session.loadUri(entry.url.ifBlank { browserPreferences.homepageUrl })
             }
@@ -277,7 +279,7 @@ class MainActivity : Activity() {
             }
         }
         binding.homeButton.setOnClickListener {
-            tabs.activeTab?.session?.loadUri(browserPreferences.homepageUrl)
+            tabs.activeTab?.let(::openHome)
         }
         binding.tabsButton.setOnClickListener {
             setChromeVisible(true)
@@ -606,7 +608,7 @@ class MainActivity : Activity() {
                 hasUserGesture: Boolean
             ) {
                 if (session != tab.session) return
-                tab.url = url.orEmpty()
+                tab.url = StartPage.displayUrl(url)
                 if (!binding.addressBar.hasFocus()) {
                     binding.addressBar.setText(tab.url)
                 }
@@ -651,7 +653,7 @@ class MainActivity : Activity() {
                 if (session != tab.session) return
                 if (tab == tabs.activeTab) markExtensionActiveTab(session)
                 tab.isLoading = true
-                tab.url = url
+                tab.url = StartPage.displayUrl(url)
                 setChromeVisible(true)
                 updateUi()
             }
@@ -1288,12 +1290,10 @@ class MainActivity : Activity() {
         if (mode == TabMode.NORMAL) {
             sessionStore.clear()
         }
-        val active = tabs.activeTab ?: tabs.create(TabMode.NORMAL).also {
-            it.session.loadUri(browserPreferences.homepageUrl)
-        }
+        val active = tabs.activeTab ?: tabs.create(TabMode.NORMAL)
         attachTab(active)
-        if (active.url.isBlank()) {
-            active.session.loadUri(browserPreferences.homepageUrl)
+        if (active.url.isBlank() && active.sessionState.isBlank()) {
+            openHome(active)
         }
         saveNormalSession()
         updateUi()
@@ -1850,10 +1850,11 @@ class MainActivity : Activity() {
 
     private fun saveNormalSession() {
         sessionStore.save(tabs.all().filterNot { it.isPrivate }.map { tab ->
+            // A blank url means the start page (or a fresh tab): store a marker, not the data: URI state.
             SessionStore.Entry(
                 title = tab.title,
-                url = tab.url,
-                state = tab.sessionState
+                url = tab.url.ifBlank { StartPage.SESSION_URL },
+                state = if (tab.url.isBlank()) "" else tab.sessionState
             )
         })
     }
@@ -1900,7 +1901,7 @@ class MainActivity : Activity() {
             createTab = { mode ->
                 val tab = tabs.create(mode)
                 attachTab(tab)
-                tab.session.loadUri(browserPreferences.homepageUrl)
+                openHome(tab)
                 setChromeVisible(true)
             },
             closeTab = { tab ->
@@ -1924,15 +1925,33 @@ class MainActivity : Activity() {
         }
         val tab = tabs.create(TabMode.NORMAL)
         attachTab(tab)
-        tab.session.loadUri(browserPreferences.homepageUrl)
+        openHome(tab)
     }
 
     private fun attachCurrentOrCreate() {
         val active = tabs.activeTab ?: tabs.create(TabMode.NORMAL)
         attachTab(active)
-        if (active.url.isBlank()) {
-            active.session.loadUri(browserPreferences.homepageUrl)
+        if (active.url.isBlank() && active.sessionState.isBlank()) {
+            openHome(active)
         }
+    }
+
+    /** Loads the start page (or the homepage URL when the start page setting is off) into [tab]. */
+    private fun openHome(tab: BrowserTab) {
+        if (!browserPreferences.newTabPage) {
+            tab.session.loadUri(browserPreferences.homepageUrl)
+            return
+        }
+        val html = StartPage.render(
+            bookmarks = bookmarksStore.entries(),
+            topSites = StartPage.topSites(historyStore.entries()),
+            searchEngine = browserPreferences.searchEngine
+        )
+        tab.url = ""
+        if (tab == tabs.activeTab && !binding.addressBar.hasFocus()) {
+            binding.addressBar.setText("")
+        }
+        tab.session.loadUri(StartPage.dataUri(html))
     }
 
     private fun attachTab(tab: BrowserTab) {
