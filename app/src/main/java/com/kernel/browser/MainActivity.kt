@@ -401,6 +401,8 @@ class MainActivity : Activity() {
         binding.addressBar.setOnFocusChangeListener { _, hasFocus ->
             addressBarEditing = hasFocus
             addressEdited = false
+            // While typing, the navigation row is dead weight; give the suggestions its room.
+            if (!findActive) binding.bottomBar.visibility = if (hasFocus) View.GONE else View.VISIBLE
             if (hasFocus) {
                 cancelChromeAutoHide()
                 setChromeVisible(true)
