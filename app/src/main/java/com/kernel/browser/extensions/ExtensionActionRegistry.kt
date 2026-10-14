@@ -37,6 +37,12 @@ class ExtensionActionRegistry(
         extension.setActionDelegate(this)
     }
 
+    fun entry(id: String): ExtensionActionEntry? = actions[id]
+
+    fun remove(id: String) {
+        if (actions.remove(id) != null) onChanged()
+    }
+
     fun open(entry: ExtensionActionEntry) {
         SafeLog.status("Opening extension action: ${entry.extension.id}")
         entry.action.click()
@@ -120,10 +126,11 @@ class ExtensionActionRegistry(
             session.loadUri(popupUri)
         }
 
+        val popupHeight = minOf(dp(520), (context.resources.displayMetrics.heightPixels * 0.7f).toInt())
         val geckoView = GeckoView(context).apply {
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(520)
+                popupHeight
             )
             setSession(session)
         }

@@ -53,6 +53,12 @@ class BrowserPreferences(context: Context) {
             preferences.edit().putInt(KEY_PAGE_ZOOM_PERCENT, value.coerceIn(70, 150)).apply()
         }
 
+    var autoplay: AutoplayPolicy
+        get() = AutoplayPolicy.byId(preferences.getString(KEY_AUTOPLAY, AutoplayPolicy.BLOCK_AUDIBLE.id))
+        set(value) {
+            preferences.edit().putString(KEY_AUTOPLAY, value.id).apply()
+        }
+
     val searchEngine: SearchEngine
         get() = SearchEngine.byId(searchEngineId)
 
@@ -70,6 +76,7 @@ class BrowserPreferences(context: Context) {
         private const val KEY_LOGIN_AUTOFILL = "login_autofill"
         private const val KEY_JAVASCRIPT_ENABLED = "javascript_enabled"
         private const val KEY_PAGE_ZOOM_PERCENT = "page_zoom_percent"
+        private const val KEY_AUTOPLAY = "autoplay"
     }
 }
 
@@ -107,5 +114,15 @@ enum class SearchEngine(
         fun byId(id: String): SearchEngine {
             return all.firstOrNull { it.id == id } ?: GOOGLE
         }
+    }
+}
+
+enum class AutoplayPolicy(val id: String, val displayName: String, val summary: String) {
+    ALLOW_ALL("allow_all", "Allow audio and video", "Videos can start playing with sound."),
+    BLOCK_AUDIBLE("block_audible", "Block audio only", "Muted previews play; sound waits for a tap."),
+    BLOCK_ALL("block_all", "Block audio and video", "Nothing plays until you tap it.");
+
+    companion object {
+        fun byId(id: String?): AutoplayPolicy = entries.firstOrNull { it.id == id } ?: BLOCK_AUDIBLE
     }
 }

@@ -14,4 +14,16 @@
     <color name="kernel_danger">#FF6B7A</color>
     <color name="kernel_disabled">#70747C</color>
     <color name="kernel_scrim">#99000000</color>
+    <color name="kernel_on_accent">#0B1B33</color>
+    <color name="kernel_divider">#3F4247</color>
+    <color name="kernel_group">#2C2D31</color>
+    <color name="tile_blue">#3B82F6</color>
+    <color name="tile_green">#22A55A</color>
+    <color name="tile_orange">#F08A24</color>
+    <color name="tile_red">#E5484D</color>
+    <color name="tile_purple">#8B5CF6</color>
+    <color name="tile_teal">#12A594</color>
+    <color name="tile_pink">#D6409F</color>
+    <color name="tile_gray">#6B7280</color>
+    <color name="tile_indigo">#5B5BD6</color>
 </resources>

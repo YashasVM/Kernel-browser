@@ -2,9 +2,9 @@ plugins {
     id("com.android.application")
 }
 
-val appVersionCode = 12
-val appVersionName = "1.10"
-val uiBuildTag = "v1.10-safari-suggestions-2026-06-24"
+val appVersionCode = 13
+val appVersionName = "1.11"
+val uiBuildTag = "v1.11-extensions-settings-2026-10-14"
 
 android {
     namespace = "com.kernel.browser"
@@ -43,6 +43,12 @@ android {
                 "proguard-rules.pro"
             )
         }
+    }
+
+    androidResources {
+        // AGP's default pattern drops "_*" directories, which strips the required _locales
+        // folder from bundled WebExtensions and makes Gecko reject them as invalid.
+        ignoreAssetsPattern = "!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~"
     }
 
     buildFeatures {

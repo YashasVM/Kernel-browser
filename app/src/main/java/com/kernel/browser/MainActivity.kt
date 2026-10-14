@@ -25,6 +25,7 @@ import android.text.TextWatcher
 import android.content.Context
 import android.content.Intent
 import android.app.Activity
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.net.Uri
@@ -37,7 +38,7 @@ import android.widget.Switch
 import android.widget.Toast
 import com.kernel.browser.databinding.ActivityMainBinding
 import com.kernel.browser.extensions.ExtensionActionRegistry
-import com.kernel.browser.extensions.ExtensionInstaller
+import com.kernel.browser.extensions.ExtensionManager
 import com.kernel.browser.extensions.ExtensionPreferences
 import com.kernel.browser.tabs.BrowserTab
 import com.kernel.browser.tabs.BrowserTabs
@@ -49,19 +50,25 @@ import org.mozilla.geckoview.GeckoResult
 import org.mozilla.geckoview.GeckoRuntime
 import org.mozilla.geckoview.GeckoSession
 import org.mozilla.geckoview.GeckoSessionSettings
+import org.mozilla.geckoview.MediaSession
+import org.mozilla.geckoview.WebExtension
+import org.mozilla.geckoview.WebExtensionController
 import org.mozilla.geckoview.WebResponse
 import org.json.JSONArray
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import java.io.File
+import java.util.concurrent.Executors
 
 class MainActivity : Activity() {
     private lateinit var binding: ActivityMainBinding
     private lateinit var runtime: GeckoRuntime
     private lateinit var tabs: BrowserTabs
     private lateinit var extensionPreferences: ExtensionPreferences
-    private lateinit var extensionInstaller: ExtensionInstaller
+    private lateinit var extensionManager: ExtensionManager
     private lateinit var extensionActionRegistry: ExtensionActionRegistry
+    private lateinit var extensionsUi: ExtensionsDialogController
     private lateinit var historyStore: BrowserHistoryStore
     private lateinit var bookmarksStore: BookmarksStore
     private lateinit var downloadStore: DownloadStore
@@ -74,7 +81,9 @@ class MainActivity : Activity() {
     private var addressBarEditing = false
     private var suggestionsVisible = false
     private var suggestionRequestId = 0
-    private val searchRecommendationCache = mutableMapOf<String, List<String>>()
+    private val searchRecommendationCache = object : LinkedHashMap<String, List<String>>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<String>>?) = size > 64
+    }
     private val chromeHandler = Handler(Looper.getMainLooper())
     private val chromeInterpolator = PathInterpolator(0.2f, 0f, 0f, 1f)
     private val hideChromeRunnable = Runnable { setChromeVisible(false, auto = true) }
@@ -82,6 +91,13 @@ class MainActivity : Activity() {
     private var pendingFilePrompt: GeckoSession.PromptDelegate.FilePrompt? = null
     private var pendingFileResult: GeckoResult<GeckoSession.PromptDelegate.PromptResponse>? = null
     private var lastClosedNormalTab: ClosedTab? = null
+    private var fullScreenSession: GeckoSession? = null
+    private val playingSessions = mutableSetOf<GeckoSession>()
+    private val saveSessionRunnable = Runnable { saveNormalSession() }
+    private val suggestionExecutor = Executors.newSingleThreadExecutor()
+    private var pendingSuggestionQuery: Runnable? = null
+    private var pendingDownload: WebResponse? = null
+    private var extensionActiveSession: GeckoSession? = null
 
     private data class AddressSuggestion(
         val title: String,
@@ -118,10 +134,21 @@ class MainActivity : Activity() {
         applyRuntimePreferences()
         extensionPreferences = ExtensionPreferences(this)
         extensionActionRegistry = ExtensionActionRegistry(this, runtime) {
-            runOnUiThread { updateUi() }
+            runOnUiThread {
+                updateUi()
+                if (::extensionsUi.isInitialized) extensionsUi.onExtensionsChanged()
+            }
         }
-        extensionInstaller = ExtensionInstaller(runtime, extensionPreferences, extensionActionRegistry)
-        extensionInstaller.syncAllowlist()
+        extensionManager = ExtensionManager(runtime, extensionPreferences, extensionActionRegistry)
+        extensionsUi = ExtensionsDialogController(
+            context = this,
+            manager = extensionManager,
+            actionRegistry = extensionActionRegistry,
+            openUrl = ::openInNewTab,
+            pickExtensionFile = ::pickExtensionFile
+        )
+        extensionManager.host = extensionHost
+        extensionManager.start()
 
         tabs = BrowserTabs(runtime, ::configureSession)
         restoreTabsOrCreateHome(intent)
@@ -131,6 +158,24 @@ class MainActivity : Activity() {
         updateUi()
     }
 
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        // The activity handles rotation itself, so the floating toolbar must be resized here;
+        // otherwise it keeps the width it had in the previous orientation.
+        binding.root.post { applyChromeWidth() }
+    }
+
+    private fun applyChromeWidth() {
+        val params = binding.bottomChrome.layoutParams as FrameLayout.LayoutParams
+        params.width = chromeWidth()
+        params.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+        params.marginStart = 0
+        params.marginEnd = 0
+        binding.bottomChrome.layoutParams = params
+        updateSuggestionPanelPosition()
+        binding.bottomChrome.post { updateGeckoChromeInsets() }
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
@@ -138,21 +183,31 @@ class MainActivity : Activity() {
     }
 
     override fun onPause() {
+        chromeHandler.removeCallbacks(saveSessionRunnable)
         saveNormalSession()
         super.onPause()
     }
 
     override fun onDestroy() {
+        chromeHandler.removeCallbacksAndMessages(null)
         if (isFinishing) {
             saveNormalSession()
             tabs.closePrivateTabs()
         }
+        extensionManager.host = null
+        suggestionExecutor.shutdownNow()
         super.onDestroy()
     }
 
     override fun onBackPressed() {
         val tab = tabs.activeTab
-        if (tab?.canGoBack == true) {
+        if (fullScreenSession != null) {
+            fullScreenSession?.exitFullScreen()
+        } else if (binding.addressBar.hasFocus()) {
+            binding.addressBar.clearFocus()
+            (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
+                .hideSoftInputFromWindow(binding.addressBar.windowToken, 0)
+        } else if (tab?.canGoBack == true) {
             tab.session.goBack()
         } else {
             super.onBackPressed()
@@ -229,12 +284,8 @@ class MainActivity : Activity() {
             showTabsDialog()
         }
         binding.extensionsButton.setOnClickListener {
-            ExtensionsDialogController(
-                context = this,
-                actionRegistry = extensionActionRegistry,
-                extensionPreferences = extensionPreferences,
-                extensionInstaller = extensionInstaller
-            ).show()
+            setChromeVisible(true)
+            extensionsUi.show()
         }
         binding.settingsButton.setOnClickListener {
             setChromeVisible(true)
@@ -248,12 +299,15 @@ class MainActivity : Activity() {
         }
 
         binding.addressBar.setOnEditorActionListener { _, actionId, event ->
-            val isEnter = event?.keyCode == KeyEvent.KEYCODE_ENTER && event.action == KeyEvent.ACTION_UP
-            if (actionId == EditorInfo.IME_ACTION_GO || isEnter) {
-                loadFromAddressBar()
-                true
-            } else {
-                false
+            val isEnter = event?.keyCode == KeyEvent.KEYCODE_ENTER
+            when {
+                // Hardware keyboards deliver Enter as a down/up pair; act on down, swallow up.
+                isEnter && event?.action == KeyEvent.ACTION_UP -> true
+                actionId == EditorInfo.IME_ACTION_GO || isEnter -> {
+                    loadFromAddressBar()
+                    true
+                }
+                else -> false
             }
         }
         binding.addressBar.setOnFocusChangeListener { _, hasFocus ->
@@ -310,6 +364,8 @@ class MainActivity : Activity() {
             params.bottomMargin = bottomInset + ChromeSheet.dp(this, 12)
             params.width = chromeWidth()
             params.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            params.marginStart = 0
+            params.marginEnd = 0
             binding.bottomChrome.layoutParams = params
             binding.bottomChrome.post {
                 updateSuggestionPanelPosition()
@@ -363,20 +419,73 @@ class MainActivity : Activity() {
             override fun onTitleChange(session: GeckoSession, title: String?) {
                 if (session != tab.session) return
                 tab.title = title.orEmpty()
-                captureThumbnail(tab)
                 recordHistory(tab)
                 updateUi()
             }
 
             override fun onCloseRequest(session: GeckoSession) {
+                if (fullScreenSession == session) onFullScreenChanged(session, false)
                 rememberClosedTab(tab)
+                tabThumbnails.remove(tab.id)?.recycle()
                 tabs.close(tab.id)
                 attachCurrentOrCreate()
                 saveNormalSession()
             }
 
+            override fun onFullScreen(session: GeckoSession, fullScreen: Boolean) {
+                onFullScreenChanged(session, fullScreen)
+            }
+
             override fun onExternalResponse(session: GeckoSession, response: WebResponse) {
-                startDownload(response)
+                if (isExtensionPackage(response.uri, response.headers["Content-Type"] ?: response.headers["content-type"])) {
+                    extensionManager.install(response.uri)
+                } else {
+                    startDownload(response)
+                }
+            }
+
+            override fun onCrash(session: GeckoSession) {
+                recoverSession(tab, "This page crashed and was reloaded")
+            }
+
+            override fun onKill(session: GeckoSession) {
+                recoverSession(tab, null)
+            }
+        }
+
+        tab.session.mediaSessionDelegate = object : MediaSession.Delegate {
+            override fun onPlay(session: GeckoSession, mediaSession: MediaSession) {
+                playingSessions += session
+                updateKeepScreenOn()
+            }
+
+            override fun onPause(session: GeckoSession, mediaSession: MediaSession) {
+                playingSessions -= session
+                updateKeepScreenOn()
+            }
+
+            override fun onStop(session: GeckoSession, mediaSession: MediaSession) {
+                playingSessions -= session
+                updateKeepScreenOn()
+            }
+
+            override fun onDeactivated(session: GeckoSession, mediaSession: MediaSession) {
+                playingSessions -= session
+                updateKeepScreenOn()
+            }
+
+            override fun onFullscreen(
+                session: GeckoSession,
+                mediaSession: MediaSession,
+                enabled: Boolean,
+                meta: MediaSession.ElementMetadata?
+            ) {
+                // Rotate landscape videos into landscape while they are fullscreen, like a video app.
+                requestedOrientation = if (enabled && meta != null && meta.width > meta.height) {
+                    ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                } else {
+                    ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                }
             }
         }
 
@@ -398,6 +507,7 @@ class MainActivity : Activity() {
                 session: GeckoSession,
                 perm: GeckoSession.PermissionDelegate.ContentPermission
             ): GeckoResult<Int> {
+                autoplayDecision(perm.permission)?.let { return GeckoResult.fromValue(it) }
                 val result = GeckoResult<Int>()
                 val name = contentPermissionName(perm.permission)
                 AlertDialog.Builder(this@MainActivity)
@@ -500,7 +610,6 @@ class MainActivity : Activity() {
                 if (!binding.addressBar.hasFocus()) {
                     binding.addressBar.setText(tab.url)
                 }
-                captureThumbnail(tab)
                 recordHistory(tab)
                 updateUi()
             }
@@ -521,6 +630,10 @@ class MainActivity : Activity() {
                 session: GeckoSession,
                 request: GeckoSession.NavigationDelegate.LoadRequest
             ): GeckoResult<AllowOrDeny>? {
+                if (isExtensionPackage(request.uri, null)) {
+                    extensionManager.install(request.uri)
+                    return GeckoResult.fromValue(AllowOrDeny.DENY)
+                }
                 return GeckoResult.fromValue(AllowOrDeny.ALLOW)
             }
 
@@ -536,6 +649,7 @@ class MainActivity : Activity() {
         tab.session.progressDelegate = object : GeckoSession.ProgressDelegate {
             override fun onPageStart(session: GeckoSession, url: String) {
                 if (session != tab.session) return
+                if (tab == tabs.activeTab) markExtensionActiveTab(session)
                 tab.isLoading = true
                 tab.url = url
                 setChromeVisible(true)
@@ -548,7 +662,7 @@ class MainActivity : Activity() {
                 tab.progress = 0
                 captureThumbnail(tab)
                 recordHistory(tab)
-                saveNormalSession()
+                scheduleSessionSave()
                 updateUi()
             }
 
@@ -574,7 +688,8 @@ class MainActivity : Activity() {
             ) {
                 if (session != tab.session) return
                 tab.sessionState = sessionState.toString()
-                saveNormalSession()
+                // Fires on every scroll; batch the writes instead of hitting disk each time.
+                if (!tab.isPrivate) scheduleSessionSave()
             }
         }
     }
@@ -656,7 +771,16 @@ class MainActivity : Activity() {
 
     private fun fetchSearchRecommendations(query: String) {
         val requestId = ++suggestionRequestId
-        Thread {
+        pendingSuggestionQuery?.let(chromeHandler::removeCallbacks)
+        // Wait for a short typing pause so fast typists don't fire one request per key.
+        val request = Runnable { suggestionExecutor.execute { loadSearchRecommendations(query, requestId) } }
+        pendingSuggestionQuery = request
+        chromeHandler.postDelayed(request, SUGGESTION_DEBOUNCE_MS)
+    }
+
+    private fun loadSearchRecommendations(query: String, requestId: Int) {
+        if (requestId != suggestionRequestId) return
+        run {
             val recommendations = runCatching {
                 val suggestionsUrl = browserPreferences.searchEngine.suggestionsUrl
                 if (suggestionsUrl == null) {
@@ -683,7 +807,7 @@ class MainActivity : Activity() {
                     updateAddressSuggestions()
                 }
             }
-        }.start()
+        }
     }
 
     private fun renderAddressSuggestions(suggestions: List<AddressSuggestion>) {
@@ -787,6 +911,8 @@ class MainActivity : Activity() {
         val params = binding.suggestionsPanel.layoutParams as FrameLayout.LayoutParams
         params.width = chromeWidth()
         params.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+        params.marginStart = 0
+        params.marginEnd = 0
         params.bottomMargin = bottomInset + binding.bottomChrome.height + ChromeSheet.dp(this, 24)
         binding.suggestionsPanel.layoutParams = params
     }
@@ -810,6 +936,7 @@ class MainActivity : Activity() {
     }
 
     private fun setChromeVisible(visible: Boolean, auto: Boolean = false) {
+        if (fullScreenSession != null) return
         if (chromeHidden == !visible) {
             if (visible) scheduleChromeAutoHide()
             return
@@ -845,9 +972,9 @@ class MainActivity : Activity() {
     }
 
     private fun scheduleChromeAutoHide() {
+        // The toolbar now only hides while scrolling down (see the scroll delegate), like
+        // Safari and Firefox; hiding on a timer made controls vanish while reading.
         cancelChromeAutoHide()
-        if (addressBarEditing) return
-        chromeHandler.postDelayed(hideChromeRunnable, 4_000L)
     }
 
     private fun cancelChromeAutoHide() {
@@ -855,6 +982,7 @@ class MainActivity : Activity() {
     }
 
     private fun updateGeckoChromeInsets() {
+        if (fullScreenSession != null) return
         val chromeHeight = binding.bottomChrome.height
         if (chromeHeight <= 0) return
         val bottomMargin = (binding.bottomChrome.layoutParams as? FrameLayout.LayoutParams)?.bottomMargin ?: bottomInset
@@ -867,152 +995,98 @@ class MainActivity : Activity() {
     private fun showBrowserMenu() {
         val tab = tabs.activeTab
         val url = tab?.url.orEmpty()
+        val bookmarked = bookmarksStore.isBookmarked(url)
         ChromeSheet.show(
             context = this,
-            title = "Browser",
-            subtitle = tab?.title?.takeIf { it.isNotBlank() } ?: url.takeIf { it.isNotBlank() }
+            title = tab?.title?.takeIf { it.isNotBlank() } ?: "Menu",
+            subtitle = runCatching { Uri.parse(url).host }.getOrNull()?.removePrefix("www.") ?: url.takeIf { it.isNotBlank() }
         ) { dialog ->
-            addView(ChromeSheet.sectionLabel(this@MainActivity, "Page"))
-            addView(ChromeSheet.row(
-                context = this@MainActivity,
-                title = if (bookmarksStore.isBookmarked(url)) "Remove bookmark" else "Add bookmark",
-                subtitle = url.ifBlank { "Open a page to bookmark it." },
-                onClick = {
-                    dialog.dismiss()
-                    toggleBookmark()
-                }
-            ))
-            addView(ChromeSheet.row(
-                context = this@MainActivity,
-                title = "Share",
-                subtitle = "Send this page to another app.",
-                onClick = {
-                    dialog.dismiss()
-                    shareCurrentPage()
-                }
-            ))
-            addView(ChromeSheet.row(
-                context = this@MainActivity,
-                title = "Copy link",
-                subtitle = "Copy the current URL.",
-                onClick = {
-                    dialog.dismiss()
-                    copyCurrentLink()
-                }
-            ))
-            addView(ChromeSheet.row(
-                context = this@MainActivity,
-                title = "Find in page",
-                subtitle = "Search text on the current page.",
-                onClick = {
-                    dialog.dismiss()
-                    showFindSheet()
-                }
-            ))
-            addView(ChromeSheet.row(
-                context = this@MainActivity,
-                title = "Reader view",
-                subtitle = "Open this page with Gecko's reader view when available.",
-                onClick = {
-                    dialog.dismiss()
-                    openReaderView()
-                }
-            ))
-            addView(ChromeSheet.row(
-                context = this@MainActivity,
-                title = "Site info",
-                subtitle = securitySummary(tab),
-                onClick = {
-                    dialog.dismiss()
-                    showSiteInfo()
-                }
-            ))
-            addView(ChromeSheet.row(
-                context = this@MainActivity,
-                title = "Page zoom",
-                subtitle = "${browserPreferences.pageZoomPercent}%",
-                onClick = {
-                    dialog.dismiss()
-                    showPageZoomSheet()
-                }
+            fun run(action: () -> Unit): () -> Unit = {
+                dialog.dismiss()
+                action()
+            }
+            addView(LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                addView(quickAction(if (bookmarked) R.drawable.ic_bookmark else R.drawable.ic_bookmark_border,
+                    if (bookmarked) "Saved" else "Bookmark", run(::toggleBookmark)))
+                addView(quickAction(R.drawable.ic_share, "Share", run(::shareCurrentPage)))
+                addView(quickAction(R.drawable.ic_search, "Find", run(::showFindSheet)))
+                addView(quickAction(R.drawable.ic_add, "New tab", run {
+                    val newTab = tabs.create(TabMode.NORMAL)
+                    attachTab(newTab)
+                    newTab.session.loadUri(browserPreferences.homepageUrl)
+                    binding.addressBar.requestFocus()
+                }))
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = ChromeSheet.dp(this@MainActivity, 4)
+            })
+
+            addView(KernelUi.sectionHeader(this@MainActivity, "This page"))
+            addView(KernelUi.group(
+                this@MainActivity,
+                KernelUi.toggle(this@MainActivity, "Desktop site", icon = R.drawable.ic_desktop, tile = R.color.tile_indigo,
+                    checked = browserPreferences.desktopMode) {
+                    browserPreferences.desktopMode = it
+                    applyDesktopModeToAllTabs(reloadActive = true)
+                },
+                KernelUi.item(this@MainActivity, "Reader view", icon = R.drawable.ic_reader, tile = R.color.tile_orange,
+                    onClick = run(::openReaderView)),
+                KernelUi.item(this@MainActivity, "Copy link", icon = R.drawable.ic_link, tile = R.color.tile_blue,
+                    onClick = run(::copyCurrentLink)),
+                KernelUi.item(this@MainActivity, "Site info", subtitle = securitySummary(tab),
+                    icon = if (tab?.isSecure == true) R.drawable.ic_lock else R.drawable.ic_info,
+                    tile = if (tab?.isSecure == true) R.color.tile_green else R.color.tile_gray,
+                    chevron = true, onClick = run(::showSiteInfo))
             ))
 
-            addView(ChromeSheet.sectionLabel(this@MainActivity, "Library"))
-            addView(ChromeSheet.row(
-                context = this@MainActivity,
-                title = "Bookmarks",
-                subtitle = "${bookmarksStore.entries().size} saved",
-                onClick = {
-                    dialog.dismiss()
-                    showBookmarksSheet()
-                }
+            addView(KernelUi.sectionHeader(this@MainActivity, "Browser"))
+            addView(KernelUi.group(
+                this@MainActivity,
+                KernelUi.item(this@MainActivity, "Bookmarks", icon = R.drawable.ic_bookmark, tile = R.color.tile_orange,
+                    value = bookmarksStore.entries().size.takeIf { it > 0 }?.toString(), chevron = true, onClick = run(::showBookmarksSheet)),
+                KernelUi.item(this@MainActivity, "Downloads", icon = R.drawable.ic_download, tile = R.color.tile_green,
+                    value = downloadStore.entries().size.takeIf { it > 0 }?.toString(), chevron = true, onClick = run(::showDownloadsSheet)),
+                KernelUi.item(this@MainActivity, "Extensions", icon = R.drawable.ic_extension, tile = R.color.tile_purple,
+                    value = "${extensionManager.enabledCount()} on", chevron = true, onClick = run { extensionsUi.show() }),
+                KernelUi.item(this@MainActivity, "Reopen closed tab",
+                    subtitle = lastClosedNormalTab?.title?.ifBlank { lastClosedNormalTab?.url },
+                    icon = R.drawable.ic_tab_restore, tile = R.color.tile_teal, onClick = run(::undoCloseTab)),
+                KernelUi.item(this@MainActivity, "Settings", icon = R.drawable.ic_settings, tile = R.color.tile_gray,
+                    chevron = true, onClick = run(::showSettings))
             ))
-            addView(ChromeSheet.row(
-                context = this@MainActivity,
-                title = "Downloads",
-                subtitle = "${downloadStore.entries().size} recent",
-                onClick = {
-                    dialog.dismiss()
-                    showDownloadsSheet()
-                }
-            ))
-            addView(ChromeSheet.sectionLabel(this@MainActivity, "Tabs"))
-            addView(ChromeSheet.row(
-                context = this@MainActivity,
-                title = "Undo close tab",
-                subtitle = lastClosedNormalTab?.title?.ifBlank { lastClosedNormalTab?.url }.orEmpty().ifBlank { "No normal tab to restore." },
-                onClick = {
-                    dialog.dismiss()
-                    undoCloseTab()
-                }
-            ))
-            addView(ChromeSheet.row(
-                context = this@MainActivity,
-                title = "Close normal tabs",
-                subtitle = "Close all normal tabs and return to the homepage.",
-                onClick = {
-                    dialog.dismiss()
-                    closeNormalTabs()
-                }
-            ))
-            addView(ChromeSheet.sectionLabel(this@MainActivity, "Privacy"))
-            addView(ChromeSheet.row(
-                context = this@MainActivity,
-                title = "Desktop site",
-                subtitle = if (browserPreferences.desktopMode) "Desktop user agent and viewport are on." else "Mobile site mode is on.",
-                trailing = Switch(this@MainActivity).apply {
-                    minWidth = ChromeSheet.dp(this@MainActivity, 56)
-                    isChecked = browserPreferences.desktopMode
-                    setOnCheckedChangeListener { _, checked ->
-                        browserPreferences.desktopMode = checked
-                        applyDesktopModeToAllTabs(reloadActive = true)
-                    }
-                }
-            ))
-            addView(ChromeSheet.row(
-                context = this@MainActivity,
-                title = "Tracking protection",
-                subtitle = if (browserPreferences.trackingProtection) "Trackers, cryptominers, and fingerprinting are blocked." else "Tracking protection is off.",
-                trailing = Switch(this@MainActivity).apply {
-                    minWidth = ChromeSheet.dp(this@MainActivity, 56)
-                    isChecked = browserPreferences.trackingProtection
-                    setOnCheckedChangeListener { _, checked ->
-                        browserPreferences.trackingProtection = checked
-                        applyRuntimePreferences()
-                        applyDesktopModeToAllTabs(reloadActive = true)
-                    }
-                }
-            ))
-            addView(ChromeSheet.sectionLabel(this@MainActivity, "Settings"))
-            addView(ChromeSheet.row(
-                context = this@MainActivity,
-                title = "Settings",
-                subtitle = "Search, homepage, privacy, history, and extensions.",
-                onClick = {
-                    dialog.dismiss()
-                    showSettings()
-                }
-            ))
+        }
+    }
+
+    private fun quickAction(icon: Int, label: String, onClick: () -> Unit): LinearLayout {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(0, ChromeSheet.dp(this@MainActivity, 12), 0, ChromeSheet.dp(this@MainActivity, 10))
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(getColor(R.color.kernel_group))
+                cornerRadius = ChromeSheet.dp(this@MainActivity, 16).toFloat()
+            }
+            foreground = selectableItemBackground()
+            isClickable = true
+            isFocusable = true
+            contentDescription = label
+            setOnClickListener { onClick() }
+            addView(ImageView(this@MainActivity).apply {
+                setImageResource(icon)
+                imageTintList = ColorStateList.valueOf(getColor(R.color.kernel_text))
+            }, LinearLayout.LayoutParams(ChromeSheet.dp(this@MainActivity, 24), ChromeSheet.dp(this@MainActivity, 24)))
+            addView(TextView(this@MainActivity).apply {
+                text = label
+                textSize = 12f
+                gravity = Gravity.CENTER
+                maxLines = 1
+                setTextColor(getColor(R.color.kernel_muted))
+                setPadding(0, ChromeSheet.dp(this@MainActivity, 6), 0, 0)
+            })
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginStart = ChromeSheet.dp(this@MainActivity, 4)
+                marginEnd = ChromeSheet.dp(this@MainActivity, 4)
+            }
         }
     }
 
@@ -1020,19 +1094,19 @@ class MainActivity : Activity() {
         SettingsDialogController(
             context = this,
             runtime = runtime,
-            extensionPreferences = extensionPreferences,
-            extensionInstaller = extensionInstaller,
             browserPreferences = browserPreferences,
             bookmarksStore = bookmarksStore,
             downloadStore = downloadStore,
             loginStore = loginStore,
+            extensionManager = extensionManager,
+            extensionsUi = extensionsUi,
             downloadStatus = ::downloadStatus,
             openDownload = ::openDownload,
             removeDownload = ::removeDownload,
             resetBrowserState = ::resetBrowserState,
             historyProvider = { historyStore.entries() },
-            openHistoryEntry = ::openHistoryEntry,
             clearHistory = { historyStore.clear() },
+            openUrl = ::openHistoryEntry,
             onPreferencesChanged = {
                 searchRecommendationCache.clear()
                 applyRuntimePreferences()
@@ -1456,23 +1530,42 @@ class MainActivity : Activity() {
 
     private fun startDownload(response: WebResponse) {
         val uri = response.uri.takeIf { it.isNotBlank() } ?: return
+        // Android 9 and older need the storage permission at runtime for public Downloads.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
+            checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
+        ) {
+            pendingDownload = response
+            requestPermissions(arrayOf(android.Manifest.permission.WRITE_EXTERNAL_STORAGE), REQUEST_STORAGE_PERMISSION)
+            return
+        }
+        enqueueDownload(response, publicDownloads = true)
+    }
+
+    private fun enqueueDownload(response: WebResponse, publicDownloads: Boolean) {
+        val uri = response.uri
         runCatching {
             val parsedUri = Uri.parse(uri)
-            val filename = parsedUri.lastPathSegment
-                ?.substringAfterLast('/')
-                ?.takeIf { it.isNotBlank() }
-                ?: "kernel-download"
+            val filename = android.webkit.URLUtil.guessFileName(
+                uri,
+                response.headers["Content-Disposition"] ?: response.headers["content-disposition"],
+                response.headers["Content-Type"] ?: response.headers["content-type"]
+            ).ifBlank { "kernel-download" }
             val request = DownloadManager.Request(parsedUri)
                 .setTitle(filename)
                 .setDescription(uri)
                 .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, filename)
                 .setAllowedOverMetered(true)
                 .setAllowedOverRoaming(true)
+                .addRequestHeader("User-Agent", "Mozilla/5.0 (Android; Mobile) Gecko Firefox KernelBrowser/${BuildConfig.VERSION_NAME}")
+            if (publicDownloads) {
+                request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, filename)
+            } else {
+                request.setDestinationInExternalFilesDir(this, Environment.DIRECTORY_DOWNLOADS, filename)
+            }
             val downloadManager = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
             val id = downloadManager.enqueue(request)
             downloadStore.record(id, filename, uri, filename)
-            Toast.makeText(this, "Download started", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Downloading $filename", Toast.LENGTH_SHORT).show()
         }.getOrElse {
             SafeLog.warning("Download failed", it)
             Toast.makeText(this, "Could not start download", Toast.LENGTH_SHORT).show()
@@ -1496,6 +1589,10 @@ class MainActivity : Activity() {
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (requestCode == REQUEST_EXTENSION_FILE) {
+            data?.data?.takeIf { resultCode == RESULT_OK }?.let(::installExtensionFromFile)
+            return
+        }
         if (requestCode == REQUEST_FILE_PICKER) {
             val prompt = pendingFilePrompt
             val result = pendingFileResult
@@ -1532,6 +1629,14 @@ class MainActivity : Activity() {
         permissions: Array<out String>,
         grantResults: IntArray
     ) {
+        if (requestCode == REQUEST_STORAGE_PERMISSION) {
+            val download = pendingDownload
+            pendingDownload = null
+            val granted = grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }
+            // Without the permission, fall back to the app's own Downloads folder instead of failing.
+            download?.let { enqueueDownload(it, publicDownloads = granted) }
+            return
+        }
         if (requestCode == REQUEST_ANDROID_PERMISSIONS) {
             val callback = pendingAndroidPermissionCallback
             pendingAndroidPermissionCallback = null
@@ -1554,7 +1659,192 @@ class MainActivity : Activity() {
             GeckoSession.PermissionDelegate.PERMISSION_AUTOPLAY_INAUDIBLE -> "inaudible autoplay"
             GeckoSession.PermissionDelegate.PERMISSION_STORAGE_ACCESS -> "storage access"
             GeckoSession.PermissionDelegate.PERMISSION_LOCAL_NETWORK_ACCESS -> "local network access"
+            GeckoSession.PermissionDelegate.PERMISSION_MEDIA_KEY_SYSTEM_ACCESS -> "protected content (DRM) playback"
             else -> "this permission"
+        }
+    }
+
+    /** Autoplay requests are answered silently from the Autoplay setting instead of a dialog per video. */
+    private fun autoplayDecision(permission: Int): Int? {
+        val allow = GeckoSession.PermissionDelegate.ContentPermission.VALUE_ALLOW
+        val deny = GeckoSession.PermissionDelegate.ContentPermission.VALUE_DENY
+        val policy = browserPreferences.autoplay
+        return when (permission) {
+            GeckoSession.PermissionDelegate.PERMISSION_AUTOPLAY_INAUDIBLE -> if (policy == AutoplayPolicy.BLOCK_ALL) deny else allow
+            GeckoSession.PermissionDelegate.PERMISSION_AUTOPLAY_AUDIBLE -> if (policy == AutoplayPolicy.ALLOW_ALL) allow else deny
+            else -> null
+        }
+    }
+
+    private fun scheduleSessionSave() {
+        chromeHandler.removeCallbacks(saveSessionRunnable)
+        chromeHandler.postDelayed(saveSessionRunnable, SESSION_SAVE_DELAY_MS)
+    }
+
+    private fun updateKeepScreenOn() {
+        playingSessions.retainAll { it.isOpen }
+        val activeSession = tabs.activeTab?.session
+        if (activeSession != null && activeSession in playingSessions) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+
+    private fun onFullScreenChanged(session: GeckoSession, fullScreen: Boolean) {
+        if (fullScreen) {
+            if (session != tabs.activeTab?.session) return
+            fullScreenSession = session
+            cancelChromeAutoHide()
+            hideAddressSuggestions()
+            binding.bottomChrome.animate().cancel()
+            binding.bottomChrome.visibility = View.GONE
+            binding.progressBar.visibility = View.GONE
+            binding.geckoView.setVerticalClipping(0)
+            binding.geckoView.setDynamicToolbarMaxHeight(0)
+            setImmersiveBars(true)
+        } else {
+            if (fullScreenSession == null) return
+            fullScreenSession = null
+            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            setImmersiveBars(false)
+            binding.bottomChrome.visibility = View.VISIBLE
+            chromeHidden = true
+            setChromeVisible(true)
+            binding.root.post { applyChromeWidth() }
+            updateUi()
+        }
+    }
+
+    private fun setImmersiveBars(enabled: Boolean) {
+        window.attributes = window.attributes.apply {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                layoutInDisplayCutoutMode = if (enabled) {
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                } else {
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT
+                }
+            }
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val controller = window.insetsController ?: return
+            if (enabled) {
+                controller.systemBarsBehavior = android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                controller.hide(android.view.WindowInsets.Type.systemBars())
+            } else {
+                controller.show(android.view.WindowInsets.Type.systemBars())
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = if (enabled) {
+                View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+            } else {
+                0
+            }
+        }
+    }
+
+    private fun recoverSession(tab: BrowserTab, message: String?) {
+        playingSessions -= tab.session
+        updateKeepScreenOn()
+        if (fullScreenSession == tab.session) onFullScreenChanged(tab.session, false)
+        if (!tab.session.isOpen) tab.session.open(runtime)
+        if (tab == tabs.activeTab) {
+            tab.session.loadUri(tab.url.ifBlank { browserPreferences.homepageUrl })
+            message?.let { Toast.makeText(this, it, Toast.LENGTH_SHORT).show() }
+        }
+    }
+
+    private fun isExtensionPackage(uri: String?, contentType: String?): Boolean {
+        if (contentType?.substringBefore(';')?.trim()?.equals("application/x-xpinstall", ignoreCase = true) == true) return true
+        val path = runCatching { Uri.parse(uri).path }.getOrNull() ?: return false
+        return (uri?.startsWith("https://") == true) && path.endsWith(".xpi", ignoreCase = true)
+    }
+
+    private fun openInNewTab(url: String) {
+        val tab = tabs.create(TabMode.NORMAL)
+        attachTab(tab)
+        tab.session.loadUri(url)
+        setChromeVisible(true)
+    }
+
+    private fun pickExtensionFile() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("application/x-xpinstall", "application/zip", "application/octet-stream"))
+        }
+        runCatching { startActivityForResult(intent, REQUEST_EXTENSION_FILE) }.getOrElse {
+            Toast.makeText(this, "No file picker available", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun installExtensionFromFile(uri: Uri) {
+        Thread {
+            val copied = runCatching {
+                val dir = File(cacheDir, "xpi").apply { mkdirs() }
+                dir.listFiles()?.forEach { it.delete() }
+                val target = File(dir, "install-${System.currentTimeMillis()}.xpi")
+                contentResolver.openInputStream(uri)!!.use { input ->
+                    target.outputStream().use { input.copyTo(it) }
+                }
+                target
+            }.getOrNull()
+            runOnUiThread {
+                if (copied == null) {
+                    Toast.makeText(this, "Could not read that file", Toast.LENGTH_SHORT).show()
+                } else {
+                    extensionManager.install(Uri.fromFile(copied).toString(), WebExtensionController.INSTALLATION_METHOD_FROM_FILE)
+                }
+            }
+        }.start()
+    }
+
+    private val extensionHost = object : ExtensionManager.Host {
+        override fun confirmInstall(
+            extension: WebExtension,
+            permissions: List<String>,
+            origins: List<String>,
+            onResult: (granted: Boolean, allowInPrivate: Boolean) -> Unit
+        ) {
+            if (isFinishing || isDestroyed) {
+                onResult(false, false)
+                return
+            }
+            extensionsUi.confirmInstall(extension, permissions, origins, onResult)
+        }
+
+        override fun confirmOptionalPermissions(extension: WebExtension, lines: List<String>, onResult: (Boolean) -> Unit) {
+            if (isFinishing || isDestroyed) {
+                onResult(false)
+                return
+            }
+            extensionsUi.confirmOptionalPermissions(extension, lines, onResult)
+        }
+
+        override fun newExtensionTab(url: String?, active: Boolean): GeckoSession {
+            val previous = tabs.activeTab
+            val tab = tabs.create(TabMode.NORMAL, open = false)
+            tab.url = url.orEmpty()
+            if (active || previous == null) {
+                attachTab(tab)
+                setChromeVisible(true)
+            } else {
+                tabs.select(previous.id)
+            }
+            updateUi()
+            return tab.session
+        }
+
+        override fun openUrlInNewTab(url: String) = openInNewTab(url)
+
+        override fun showMessage(message: String) {
+            Toast.makeText(this@MainActivity, message, Toast.LENGTH_SHORT).show()
+        }
+
+        override fun onExtensionsChanged() {
+            updateUi()
+            extensionsUi.onExtensionsChanged()
         }
     }
 
@@ -1646,12 +1936,27 @@ class MainActivity : Activity() {
     }
 
     private fun attachTab(tab: BrowserTab) {
-        tabs.activeTab?.let { captureThumbnail(it) }
+        tabs.activeTab?.let { active ->
+            captureThumbnail(active)
+            fullScreenSession?.takeIf { it == active.session && active != tab }?.exitFullScreen()
+        }
+        // If the fullscreen tab disappeared (closed or crashed), don't leave the UI stuck immersive.
+        fullScreenSession?.takeIf { it != tab.session }?.let { onFullScreenChanged(it, false) }
         tabs.select(tab.id)
+        markExtensionActiveTab(tab.session)
         binding.geckoView.setSession(tab.session)
         binding.addressBar.setText(tab.url)
         updatePrivateWindowProtection(tab)
+        updateKeepScreenOn()
         updateUi()
+    }
+
+    /** Extensions resolve "the current tab" (browser-action clicks, tabs.query) from this. */
+    private fun markExtensionActiveTab(session: GeckoSession) {
+        if (session == extensionActiveSession || !session.isOpen) return
+        extensionActiveSession?.takeIf { it.isOpen }?.let { runtime.webExtensionController.setTabActive(it, false) }
+        extensionActiveSession = session
+        runtime.webExtensionController.setTabActive(session, true)
     }
 
     private fun updatePrivateWindowProtection(tab: BrowserTab?) {
@@ -1711,7 +2016,7 @@ class MainActivity : Activity() {
             getColor(if (tab?.isSecure == true) R.color.kernel_accent else R.color.kernel_muted)
         )
         binding.securityIcon.contentDescription = securitySummary(tab)
-        binding.progressBar.visibility = if (loading) View.VISIBLE else View.GONE
+        binding.progressBar.visibility = if (loading && fullScreenSession == null) View.VISIBLE else View.GONE
         binding.progressBar.progress = tab?.progress ?: 0
         title = tab?.title?.takeIf { it.isNotBlank() } ?: getString(R.string.app_name)
     }
@@ -1719,5 +2024,9 @@ class MainActivity : Activity() {
     private companion object {
         const val REQUEST_FILE_PICKER = 41
         const val REQUEST_ANDROID_PERMISSIONS = 42
+        const val REQUEST_EXTENSION_FILE = 43
+        const val REQUEST_STORAGE_PERMISSION = 44
+        const val SESSION_SAVE_DELAY_MS = 1_500L
+        const val SUGGESTION_DEBOUNCE_MS = 150L
     }
 }
