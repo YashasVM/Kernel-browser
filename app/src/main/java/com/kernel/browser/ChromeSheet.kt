@@ -23,6 +23,7 @@ object ChromeSheet {
         title: String,
         subtitle: String? = null,
         scrollable: Boolean = true,
+        showDone: Boolean = true,
         builder: LinearLayout.(Dialog) -> Unit
     ): Dialog {
         val dialog = Dialog(context)
@@ -44,7 +45,7 @@ object ChromeSheet {
             }
         })
 
-        sheet.addView(header(context, title, subtitle) { dialog.dismiss() })
+        sheet.addView(header(context, title, subtitle, showDone) { dialog.dismiss() })
 
         val content = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -213,6 +214,7 @@ object ChromeSheet {
         context: Context,
         title: String,
         subtitle: String?,
+        showDone: Boolean,
         onDone: () -> Unit
     ): LinearLayout {
         return LinearLayout(context).apply {
@@ -238,7 +240,7 @@ object ChromeSheet {
                 }
             }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
 
-            addView(TextView(context).apply {
+            if (showDone) addView(TextView(context).apply {
                 text = "Done"
                 gravity = Gravity.CENTER
                 minWidth = dp(context, 58)
@@ -248,6 +250,40 @@ object ChromeSheet {
                 isClickable = true
                 isFocusable = true
                 setOnClickListener { onDone() }
+            })
+        }
+    }
+
+    /** A rounded single-line input that matches the sheet rows. */
+    fun textField(context: Context, hint: String, value: String? = null, password: Boolean = false): android.widget.EditText {
+        return android.widget.EditText(context).apply {
+            this.hint = hint
+            setText(value.orEmpty())
+            setSingleLine(true)
+            textSize = 16f
+            setTextColor(context.getColor(R.color.kernel_text))
+            setHintTextColor(context.getColor(R.color.kernel_disabled))
+            setBackgroundResource(R.drawable.sheet_row_background)
+            setPadding(dp(context, 16), 0, dp(context, 16), 0)
+            if (password) {
+                inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+            }
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(context, 52)).apply {
+                bottomMargin = dp(context, 10)
+            }
+        }
+    }
+
+    /** Two equal-width buttons side by side, e.g. Cancel / OK. */
+    fun buttonRow(context: Context, left: View, right: View): LinearLayout {
+        return LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(context, 8), 0, 0)
+            addView(left, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginEnd = dp(context, 6)
+            })
+            addView(right, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginStart = dp(context, 6)
             })
         }
     }
