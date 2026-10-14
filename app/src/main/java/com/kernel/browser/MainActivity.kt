@@ -86,6 +86,7 @@ class MainActivity : Activity() {
     private var settingAddressText = false
     private var findActive = false
     private var tabSwitcherPending = false
+    private var topContentInset = 0f
     private var suggestionsVisible = false
     private var suggestionRequestId = 0
     private val searchRecommendationCache = object : LinkedHashMap<String, List<String>>(64, 0.75f, true) {
@@ -367,6 +368,7 @@ class MainActivity : Activity() {
             }
         }
         configureFindBar()
+        configurePullToRefresh()
         binding.extensionsButton.setOnClickListener {
             setChromeVisible(true)
             extensionsUi.show()
@@ -449,6 +451,7 @@ class MainActivity : Activity() {
     private fun configureInsets() {
         binding.root.setOnApplyWindowInsetsListener { _, insets ->
             val topInset = insets.systemWindowInsetTop
+            topContentInset = topInset.toFloat()
             bottomInset = insets.systemWindowInsetBottom
 
             val geckoParams = binding.geckoView.layoutParams as FrameLayout.LayoutParams
@@ -751,6 +754,8 @@ class MainActivity : Activity() {
                 hasUserGesture: Boolean
             ) {
                 if (session != tab.session) return
+                // A new or restoring session reports about:blank first; keep the URL it is opening.
+                if (isInitialBlank(tab, url)) return
                 tab.url = StartPage.displayUrl(url)
                 if (tab == tabs.activeTab) refreshAddressText()
                 recordHistory(tab)
@@ -800,7 +805,7 @@ class MainActivity : Activity() {
                 if (session != tab.session) return
                 if (tab == tabs.activeTab) markExtensionActiveTab(session)
                 tab.isLoading = true
-                tab.url = StartPage.displayUrl(url)
+                if (!isInitialBlank(tab, url)) tab.url = StartPage.displayUrl(url)
                 setChromeVisible(true)
                 updateUi()
             }
@@ -1896,6 +1901,7 @@ class MainActivity : Activity() {
         if (fullScreen) {
             if (session != tabs.activeTab?.session) return
             fullScreenSession = session
+            binding.geckoView.pullEnabled = false
             cancelChromeAutoHide()
             hideAddressSuggestions()
             binding.bottomChrome.animate().cancel()
@@ -1907,6 +1913,7 @@ class MainActivity : Activity() {
         } else {
             if (fullScreenSession == null) return
             fullScreenSession = null
+            binding.geckoView.pullEnabled = true
             requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
             setImmersiveBars(false)
             binding.bottomChrome.visibility = View.VISIBLE
@@ -2339,6 +2346,41 @@ class MainActivity : Activity() {
         if (!tab.isPrivate && tab.url.isNotBlank()) showMessage("Tab closed", "Undo", ::undoCloseTab)
     }
 
+    private fun configurePullToRefresh() {
+        val indicator = binding.pullIndicator
+        val size = ChromeSheet.dp(this, 44).toFloat()
+        binding.geckoView.listener = object : PullToRefreshGeckoView.Listener {
+            override fun onPull(distance: Float, armed: Boolean) {
+                if (distance <= 0f) {
+                    indicator.animate().alpha(0f).translationY(-size).setDuration(160L)
+                        .withEndAction { indicator.visibility = View.INVISIBLE }.start()
+                    return
+                }
+                indicator.animate().cancel()
+                indicator.visibility = View.VISIBLE
+                indicator.translationY = topContentInset + distance - size
+                indicator.alpha = (distance / (size * 1.6f)).coerceIn(0f, 1f)
+                indicator.rotation = distance * 2.2f
+                indicator.imageTintList = ColorStateList.valueOf(
+                    getColor(if (armed) R.color.kernel_accent else R.color.kernel_muted)
+                )
+            }
+
+            override fun onRefresh() {
+                val tab = tabs.activeTab ?: return
+                indicator.visibility = View.VISIBLE
+                indicator.alpha = 1f
+                indicator.translationY = topContentInset + ChromeSheet.dp(this@MainActivity, 16).toFloat()
+                indicator.animate().rotationBy(720f).setDuration(700L).setInterpolator(chromeInterpolator)
+                    .withEndAction {
+                        indicator.animate().alpha(0f).translationY(-size).setDuration(200L)
+                            .withEndAction { indicator.visibility = View.INVISIBLE }.start()
+                    }.start()
+                tab.session.reload()
+            }
+        }
+    }
+
     private fun configureFindBar() {
         binding.findInput.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
@@ -2407,6 +2449,9 @@ class MainActivity : Activity() {
             binding.findCount.setTextColor(getColor(if (result.found) R.color.kernel_muted else R.color.kernel_danger))
         }, { })
     }
+
+    private fun isInitialBlank(tab: BrowserTab, url: String?): Boolean =
+        url.equals("about:blank", ignoreCase = true) && tab.url.isNotBlank()
 
     private fun showMessage(message: String, action: String? = null, onAction: (() -> Unit)? = null) {
         snackbar.show(message, action, onAction = onAction)
