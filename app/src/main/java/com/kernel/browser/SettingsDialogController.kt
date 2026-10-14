@@ -1,896 +1,612 @@
 package com.kernel.browser
 
 import android.app.Dialog
-import android.app.Activity
 import android.content.Context
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
-import android.view.Window
 import android.view.WindowManager
 import android.view.animation.PathInterpolator
-import android.widget.FrameLayout
+import android.view.inputmethod.EditorInfo
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
-import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
-import com.kernel.browser.extensions.AllowedExtension
-import com.kernel.browser.extensions.AllowedExtensions
-import com.kernel.browser.extensions.ExtensionInstaller
-import com.kernel.browser.extensions.ExtensionPreferences
+import com.kernel.browser.extensions.ExtensionManager
 import org.mozilla.geckoview.GeckoRuntime
 import org.mozilla.geckoview.GeckoSession
 import org.mozilla.geckoview.StorageController
 
+/**
+ * Full-screen Settings. Sub-pages slide in inside the same window instead of
+ * stacking bottom sheets, and every page re-renders when you come back to it so
+ * values shown on rows are always current.
+ */
 class SettingsDialogController(
     private val context: Context,
     private val runtime: GeckoRuntime,
-    private val extensionPreferences: ExtensionPreferences,
-    private val extensionInstaller: ExtensionInstaller,
     private val browserPreferences: BrowserPreferences,
     private val bookmarksStore: BookmarksStore,
     private val downloadStore: DownloadStore,
     private val loginStore: LoginStore,
+    private val extensionManager: ExtensionManager,
+    private val extensionsUi: ExtensionsDialogController,
     private val downloadStatus: (DownloadStore.Entry) -> String,
     private val openDownload: (DownloadStore.Entry) -> Unit,
     private val removeDownload: (DownloadStore.Entry) -> Unit,
     private val resetBrowserState: () -> Unit,
-    private val historyProvider: () -> List<Pair<String, String>> = { emptyList() },
-    private val openHistoryEntry: (String) -> Unit = {},
-    private val clearHistory: () -> Unit = {},
-    private val onPreferencesChanged: () -> Unit = {}
+    private val historyProvider: () -> List<Pair<String, String>>,
+    private val clearHistory: () -> Unit,
+    private val openUrl: (String) -> Unit,
+    private val onPreferencesChanged: () -> Unit
 ) {
-    private val motionInterpolator = PathInterpolator(0.2f, 0f, 0f, 1f)
+    private val motion = PathInterpolator(0.2f, 0f, 0f, 1f)
+    private val stack = mutableListOf<PageEntry>()
+    private lateinit var dialog: Dialog
+    private lateinit var host: FrameLayout
+
+    private class Page(val title: String, val onLeave: () -> Unit = {}, val build: LinearLayout.() -> Unit)
+
+    private class PageEntry(val page: Page, val view: View, val scroll: ScrollView, val content: LinearLayout)
 
     fun show() {
-        val dialog = Dialog(context)
-        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
-        val activity = context as? Activity
-        val previousStatusBarColor = activity?.window?.statusBarColor
-        val previousNavigationBarColor = activity?.window?.navigationBarColor
-        val previousSystemUiVisibility = activity?.window?.decorView?.systemUiVisibility
-        val statusOverlay = activity?.let {
-            View(context).apply {
-                setBackgroundColor(context.getColor(R.color.kernel_background))
-                elevation = ChromeSheet.dp(context, 32).toFloat()
-            }
-        }
-        val navigationOverlay = activity?.let {
-            View(context).apply {
-                setBackgroundColor(context.getColor(R.color.kernel_background))
-                elevation = ChromeSheet.dp(context, 32).toFloat()
-            }
-        }
-
-        activity?.window?.apply {
-            clearFlags(WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS)
-            addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS)
-            statusBarColor = context.getColor(R.color.kernel_background)
-            navigationBarColor = context.getColor(R.color.kernel_background)
-            decorView.systemUiVisibility = 0
-        }
-        statusOverlay?.let { overlay ->
-            (activity.window.decorView as? ViewGroup)?.addView(
-                overlay,
-                FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    statusBarHeight(),
-                    Gravity.TOP
-                )
-            )
-        }
-        navigationOverlay?.let { overlay ->
-            (activity.window.decorView as? ViewGroup)?.addView(
-                overlay,
-                FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    navigationBarHeight(),
-                    Gravity.BOTTOM
-                )
-            )
-        }
-
-        val root = FrameLayout(context).apply {
+        dialog = Dialog(context, android.R.style.Theme_Material_NoActionBar)
+        host = FrameLayout(context).apply {
             setBackgroundColor(context.getColor(R.color.kernel_background))
-            setPadding(0, statusBarHeight(), 0, navigationBarHeight())
+            fitsSystemWindows = true
         }
-
-        val content = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(ChromeSheet.dp(context, 22), ChromeSheet.dp(context, 18), ChromeSheet.dp(context, 22), ChromeSheet.dp(context, 28))
-            alpha = 0f
-            translationY = ChromeSheet.dp(context, 32).toFloat()
-        }
-
-        content.addView(header(dialog))
-        content.addView(sectionLabel("Features"))
-        content.addView(group(
-            settingsRow(
-                icon = R.drawable.ic_shield,
-                title = "Privacy & security",
-                subtitle = "Site permissions, private browsing, and browser data.",
-                position = RowPosition.TOP,
-                onClick = { showPrivacySheet() }
-            ),
-            settingsRow(
-                icon = R.drawable.ic_extension,
-                title = "Extensions",
-                subtitle = extensionStatus(),
-                position = RowPosition.MIDDLE,
-                onClick = { showExtensionsSheet() }
-            ),
-            settingsRow(
-                icon = R.drawable.ic_close,
-                title = "Clear browsing data",
-                subtitle = "Cookies, cache, permissions, storage, and open tabs.",
-                position = RowPosition.BOTTOM,
-                onClick = { confirmClearData() }
-            )
-        ))
-
-        content.addView(sectionLabel("General"))
-        content.addView(group(
-            settingsRow(
-                icon = R.drawable.ic_tabs,
-                title = "History",
-                subtitle = "Review saved browsing and clear local data.",
-                position = RowPosition.TOP,
-                onClick = { showHistorySheet() }
-            ),
-            settingsRow(
-                icon = R.drawable.ic_arrow_forward,
-                title = "Downloads",
-                subtitle = "${downloadStore.entries().size} recent downloads.",
-                position = RowPosition.MIDDLE,
-                onClick = { showDownloadsSheet() }
-            ),
-            settingsRow(
-                icon = R.drawable.ic_home,
-                title = "Bookmarks",
-                subtitle = "${bookmarksStore.entries().size} saved pages.",
-                position = RowPosition.MIDDLE,
-                onClick = { showBookmarksSheet() }
-            ),
-            settingsRow(
-                icon = R.drawable.ic_settings,
-                title = "Search engine",
-                subtitle = browserPreferences.searchEngine.displayName,
-                position = RowPosition.MIDDLE,
-                onClick = { showSearchEngineSheet() }
-            ),
-            settingsRow(
-                icon = R.drawable.ic_home,
-                title = "Homepage",
-                subtitle = browserPreferences.homepageUrl,
-                position = RowPosition.BOTTOM,
-                onClick = { showHomepageSheet() }
-            )
-        ))
-
-        content.addView(sectionLabel("Browser"))
-        content.addView(group(
-            settingsRow(
-                icon = R.drawable.ic_arrow_back,
-                title = "Page zoom",
-                subtitle = "${browserPreferences.pageZoomPercent}%",
-                position = RowPosition.TOP,
-                onClick = { showPageZoomSheet() }
-            ),
-            settingsRow(
-                icon = R.drawable.ic_shield,
-                title = "Build",
-                subtitle = "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}) - ${BuildConfig.UI_BUILD_TAG}",
-                position = RowPosition.BOTTOM,
-                onClick = {
-                    Toast.makeText(context, "Running ${BuildConfig.UI_BUILD_TAG}", Toast.LENGTH_SHORT).show()
-                }
-            )
-        ))
-
-        root.addView(ScrollView(context).apply {
-            isFillViewport = false
-            clipToPadding = false
-            addView(content)
-        }, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.MATCH_PARENT
-        ))
-
-        dialog.setContentView(root)
+        dialog.setContentView(host)
         dialog.window?.apply {
-            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
-            clearFlags(WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS)
-            addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS)
-            attributes = attributes.apply { windowAnimations = 0 }
-            setDimAmount(0f)
-            setGravity(Gravity.CENTER)
+            setBackgroundDrawable(ColorDrawable(context.getColor(R.color.kernel_background)))
             setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS)
             statusBarColor = context.getColor(R.color.kernel_background)
             navigationBarColor = context.getColor(R.color.kernel_background)
-            decorView.systemUiVisibility = 0
+            setWindowAnimations(android.R.style.Animation_Activity)
+        }
+        dialog.setOnKeyListener { _, keyCode, event ->
+            if (keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP && stack.size > 1) {
+                pop()
+                true
+            } else {
+                false
+            }
         }
         dialog.setOnDismissListener {
-            statusOverlay?.let { overlay ->
-                (overlay.parent as? ViewGroup)?.removeView(overlay)
-            }
-            navigationOverlay?.let { overlay ->
-                (overlay.parent as? ViewGroup)?.removeView(overlay)
-            }
-            activity?.window?.apply {
-                previousStatusBarColor?.let { statusBarColor = it }
-                previousNavigationBarColor?.let { navigationBarColor = it }
-                previousSystemUiVisibility?.let { decorView.systemUiVisibility = it }
-            }
+            stack.forEach { it.page.onLeave() }
+            stack.clear()
         }
-        dialog.setOnShowListener {
-            dialog.window?.apply {
-                setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-                clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
-                clearFlags(WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS)
-                addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS)
-                setDimAmount(0f)
-                setGravity(Gravity.CENTER)
-                setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-                statusBarColor = context.getColor(R.color.kernel_background)
-                navigationBarColor = context.getColor(R.color.kernel_background)
-                decorView.systemUiVisibility = 0
-            }
-            content.animate().cancel()
-            content.animate()
-                .alpha(1f)
-                .translationY(0f)
-                .setDuration(260L)
-                .setInterpolator(motionInterpolator)
-                .start()
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            // Android 13+ (always on 16 with targetSdk 36) skips the key listener above.
+            dialog.onBackInvokedDispatcher.registerOnBackInvokedCallback(
+                android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT
+            ) { pop() }
         }
+        push(mainPage(), animate = false)
         dialog.show()
     }
 
-    private fun header(dialog: Dialog): LinearLayout {
-        return LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            minimumHeight = ChromeSheet.dp(context, 64)
-            setPadding(0, 0, 0, ChromeSheet.dp(context, 10))
+    // region navigation
 
-            addView(iconButton(R.drawable.ic_arrow_back, "Close settings") { dialog.dismiss() })
-
-            addView(TextView(context).apply {
-                text = "Settings"
-                textSize = 32f
-                typeface = Typeface.DEFAULT
-                setTextColor(context.getColor(R.color.kernel_text))
-                includeFontPadding = false
-                setPadding(ChromeSheet.dp(context, 14), 0, 0, 0)
-            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-
-            addView(iconButton(R.drawable.ic_close, "Close settings") { dialog.dismiss() })
-        }
+    private fun push(page: Page, animate: Boolean = true) {
+        val entry = buildEntry(page)
+        val previous = stack.lastOrNull()
+        stack += entry
+        host.addView(entry.view, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        if (!animate || previous == null) return
+        val width = host.width.takeIf { it > 0 } ?: context.resources.displayMetrics.widthPixels
+        entry.view.translationX = width.toFloat()
+        entry.view.animate().translationX(0f).setDuration(280L).setInterpolator(motion).start()
+        previous.view.animate().translationX(-width * 0.25f).alpha(0.6f).setDuration(280L).setInterpolator(motion)
+            .withEndAction { previous.view.visibility = View.INVISIBLE }
+            .start()
     }
 
-    private fun sectionLabel(text: String): TextView {
-        return TextView(context).apply {
-            this.text = text
-            textSize = 18f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(context.getColor(R.color.kernel_muted))
-            setPadding(ChromeSheet.dp(context, 40), ChromeSheet.dp(context, 26), 0, ChromeSheet.dp(context, 12))
+    private fun pop() {
+        if (stack.size <= 1) {
+            dialog.dismiss()
+            return
         }
+        val top = stack.removeAt(stack.lastIndex)
+        top.page.onLeave()
+        val revealed = stack.last()
+        render(revealed)
+        revealed.view.visibility = View.VISIBLE
+        revealed.view.animate().translationX(0f).alpha(1f).setDuration(260L).setInterpolator(motion).start()
+        top.view.animate().translationX(host.width.toFloat()).setDuration(240L).setInterpolator(motion)
+            .withEndAction { host.removeView(top.view) }
+            .start()
     }
 
-    private fun group(vararg rows: View): LinearLayout {
-        return LinearLayout(context).apply {
+    private fun refresh() {
+        stack.lastOrNull()?.let(::render)
+    }
+
+    private fun render(entry: PageEntry) {
+        val scrollY = entry.scroll.scrollY
+        entry.content.removeAllViews()
+        entry.page.build(entry.content)
+        entry.scroll.post { entry.scroll.scrollTo(0, scrollY) }
+    }
+
+    private fun buildEntry(page: Page): PageEntry {
+        val content = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            rows.forEach { addView(it) }
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply {
-                bottomMargin = ChromeSheet.dp(context, 12)
-            }
+            setPadding(KernelUi.dp(context, 16), 0, KernelUi.dp(context, 16), KernelUi.dp(context, 40))
         }
+        val scroll = ScrollView(context).apply {
+            isVerticalScrollBarEnabled = false
+            addView(content)
+        }
+        val root = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(context.getColor(R.color.kernel_background))
+            isClickable = true
+            addView(topBar(page.title))
+            addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        }
+        val entry = PageEntry(page, root, scroll, content)
+        page.build(content)
+        return entry
     }
 
-    private fun settingsRow(
-        icon: Int,
-        title: String,
-        subtitle: String? = null,
-        position: RowPosition,
-        onClick: () -> Unit
-    ): LinearLayout {
+    private fun topBar(title: String): LinearLayout {
+        val isRoot = stack.isEmpty()
         return LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            minimumHeight = ChromeSheet.dp(context, if (subtitle.isNullOrBlank()) 72 else 82)
-            setPadding(ChromeSheet.dp(context, 22), ChromeSheet.dp(context, 12), ChromeSheet.dp(context, 16), ChromeSheet.dp(context, 12))
-            background = rowBackground(position)
-            foreground = selectableItemBackground()
-            isClickable = true
-            isFocusable = true
-            setOnClickListener { onClick() }
-            contentDescription = title
-
-            addView(ImageView(context).apply {
-                setImageResource(icon)
-                imageTintList = ColorStateList.valueOf(context.getColor(R.color.kernel_muted))
-                scaleType = ImageView.ScaleType.CENTER
-            }, LinearLayout.LayoutParams(ChromeSheet.dp(context, 32), ChromeSheet.dp(context, 32)).apply {
-                marginEnd = ChromeSheet.dp(context, 22)
-            })
-
-            addView(LinearLayout(context).apply {
-                orientation = LinearLayout.VERTICAL
-                gravity = Gravity.CENTER_VERTICAL
-
-                addView(TextView(context).apply {
-                    text = title
-                    textSize = 20f
-                    setTextColor(context.getColor(R.color.kernel_text))
-                    includeFontPadding = false
-                })
-
-                if (!subtitle.isNullOrBlank()) {
-                    addView(TextView(context).apply {
-                        text = subtitle
-                        textSize = 15f
-                        setTextColor(context.getColor(R.color.kernel_muted))
-                        includeFontPadding = false
-                        setPadding(0, ChromeSheet.dp(context, 5), 0, 0)
-                    })
-                }
-            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-
-            addView(ImageView(context).apply {
-                setImageResource(R.drawable.ic_arrow_forward)
-                imageTintList = ColorStateList.valueOf(context.getColor(R.color.kernel_muted))
-                scaleType = ImageView.ScaleType.CENTER
-            }, LinearLayout.LayoutParams(ChromeSheet.dp(context, 32), ChromeSheet.dp(context, 44)))
-        }
-    }
-
-    private fun iconButton(icon: Int, label: String, onClick: () -> Unit): ImageButton {
-        return ImageButton(context).apply {
-            setImageResource(icon)
-            imageTintList = ColorStateList.valueOf(context.getColor(R.color.kernel_text))
-            background = selectableItemBackground()
-            contentDescription = label
-            scaleType = ImageView.ScaleType.CENTER
-            isClickable = true
-            isFocusable = true
-            setOnClickListener { onClick() }
-            layoutParams = LinearLayout.LayoutParams(ChromeSheet.dp(context, 48), ChromeSheet.dp(context, 48))
-        }
-    }
-
-    private fun rowBackground(position: RowPosition): GradientDrawable {
-        val radius = ChromeSheet.dp(context, 28).toFloat()
-        val smallGap = ChromeSheet.dp(context, 6)
-        return GradientDrawable().apply {
-            shape = GradientDrawable.RECTANGLE
-            setColor(context.getColor(R.color.kernel_surface_alt))
-            cornerRadii = when (position) {
-                RowPosition.TOP -> floatArrayOf(radius, radius, radius, radius, smallGap.toFloat(), smallGap.toFloat(), smallGap.toFloat(), smallGap.toFloat())
-                RowPosition.MIDDLE -> floatArrayOf(smallGap.toFloat(), smallGap.toFloat(), smallGap.toFloat(), smallGap.toFloat(), smallGap.toFloat(), smallGap.toFloat(), smallGap.toFloat(), smallGap.toFloat())
-                RowPosition.BOTTOM -> floatArrayOf(smallGap.toFloat(), smallGap.toFloat(), smallGap.toFloat(), smallGap.toFloat(), radius, radius, radius, radius)
-                RowPosition.SINGLE -> FloatArray(8) { radius }
-            }
-        }
-    }
-
-    private fun selectableItemBackground(): android.graphics.drawable.Drawable? {
-        val attrs = context.obtainStyledAttributes(intArrayOf(android.R.attr.selectableItemBackground))
-        return attrs.getDrawable(0).also { attrs.recycle() }
-    }
-
-    private fun showHistorySheet() {
-        ChromeSheet.show(
-            context = context,
-            title = "History",
-            subtitle = "Recent pages from normal tabs."
-        ) { dialog ->
-            val entries = historyProvider()
-            if (entries.isEmpty()) {
-                addView(ChromeSheet.note(
-                    context,
-                    "Pages you visit in normal tabs will appear here. Private tabs are not saved."
-                ))
-            } else {
-                entries.take(30).forEach { (title, url) ->
-                    addView(ChromeSheet.row(
-                        context = context,
-                        title = title,
-                        subtitle = url,
-                        onClick = {
-                            dialog.dismiss()
-                            openHistoryEntry(url)
-                        }
-                    ))
-                }
-                addView(ChromeSheet.actionButton(context, "Clear history", danger = true) {
-                    clearHistory()
-                    dialog.dismiss()
-                    Toast.makeText(context, "History cleared", Toast.LENGTH_SHORT).show()
-                })
-            }
-        }
-    }
-
-    private fun showDownloadsSheet() {
-        ChromeSheet.show(
-            context = context,
-            title = "Downloads",
-            subtitle = "Recent files sent to Android downloads."
-        ) {
-            val downloads = downloadStore.entries()
-            if (downloads.isEmpty()) {
-                addView(ChromeSheet.note(context, "Files you download will appear here after they start."))
-            } else {
-                downloads.take(30).forEach { entry ->
-                    addView(ChromeSheet.row(
-                        context = context,
-                        title = entry.title,
-                        subtitle = "${downloadStatus(entry)} - ${entry.url}",
-                        trailing = ChromeSheet.actionButton(context, "Remove", danger = true) {
-                            removeDownload(entry)
-                        },
-                        onClick = { openDownload(entry) }
-                    ))
-                }
-                addView(ChromeSheet.actionButton(context, "Clear download history", danger = true) {
-                    downloadStore.clear()
-                    Toast.makeText(context, "Download history cleared", Toast.LENGTH_SHORT).show()
-                })
-            }
-        }
-    }
-
-    private fun showSearchEngineSheet() {
-        ChromeSheet.show(
-            context = context,
-            title = "Search engine",
-            subtitle = "Address bar search provider."
-        ) {
-            SearchEngine.all.forEach { engine ->
-                addView(ChromeSheet.row(
-                    context = context,
-                    title = engine.displayName,
-                    subtitle = if (engine.suggestionsUrl == null) "Search only" else "Search and suggestions",
-                    trailing = if (browserPreferences.searchEngine == engine) ChromeSheet.statusPill(context, "On", true) else null,
-                    onClick = {
-                        browserPreferences.searchEngineId = engine.id
-                        onPreferencesChanged()
-                        Toast.makeText(context, "Search engine set to ${engine.displayName}", Toast.LENGTH_SHORT).show()
-                    }
-                ))
-            }
-        }
-    }
-
-    private fun showHomepageSheet() {
-        ChromeSheet.show(
-            context = context,
-            title = "Homepage",
-            subtitle = "Shown when you tap Home."
-        ) {
-            val input = EditText(context).apply {
-                setText(browserPreferences.homepageUrl)
-                selectAll()
-                setSingleLine(true)
-                textSize = 16f
+            minimumHeight = KernelUi.dp(context, 60)
+            setPadding(KernelUi.dp(context, 6), KernelUi.dp(context, 4), KernelUi.dp(context, 16), 0)
+            addView(ImageButton(context).apply {
+                setImageResource(if (isRoot) R.drawable.ic_close else R.drawable.ic_arrow_back)
+                imageTintList = ColorStateList.valueOf(context.getColor(R.color.kernel_text))
+                background = KernelUi.selectableItemBackground(context)
+                contentDescription = if (isRoot) "Close settings" else "Back"
+                setOnClickListener { pop() }
+            }, LinearLayout.LayoutParams(KernelUi.dp(context, 48), KernelUi.dp(context, 48)))
+            addView(TextView(context).apply {
+                text = title
+                textSize = if (isRoot) 28f else 22f
+                typeface = Typeface.DEFAULT_BOLD
                 setTextColor(context.getColor(R.color.kernel_text))
-                setHintTextColor(context.getColor(R.color.kernel_muted))
-                hint = "https://example.com"
-            }
-            addView(input, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ChromeSheet.dp(context, 54)
-            ).apply {
-                bottomMargin = ChromeSheet.dp(context, 10)
-            })
-            addView(actionRow(
-                ChromeSheet.actionButton(context, "Reset") {
-                    browserPreferences.resetHomepage()
-                    onPreferencesChanged()
-                    Toast.makeText(context, "Homepage reset", Toast.LENGTH_SHORT).show()
-                },
-                ChromeSheet.actionButton(context, "Save", primary = true) {
-                    browserPreferences.homepageUrl = input.text.toString()
-                    onPreferencesChanged()
-                    Toast.makeText(context, "Homepage saved", Toast.LENGTH_SHORT).show()
-                }
-            ))
-            addView(ChromeSheet.row(
-                context = context,
-                title = "Current homepage",
-                subtitle = browserPreferences.homepageUrl,
-                trailing = ChromeSheet.statusPill(context, "On", true)
-            ))
+                setPadding(KernelUi.dp(context, 8), 0, 0, 0)
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         }
     }
 
-    private fun showBookmarksSheet() {
-        ChromeSheet.show(
-            context = context,
-            title = "Bookmarks",
-            subtitle = "Saved pages."
-        ) {
-            val bookmarks = bookmarksStore.entries()
-            if (bookmarks.isEmpty()) {
-                addView(ChromeSheet.note(context, "Bookmarked pages will appear here."))
-            } else {
-                bookmarks.forEach { (title, url) ->
-                    addView(ChromeSheet.row(
-                        context = context,
-                        title = title,
-                        subtitle = url
-                    ))
-                }
-                addView(ChromeSheet.actionButton(context, "Clear bookmarks", danger = true) {
-                    bookmarksStore.clear()
-                    Toast.makeText(context, "Bookmarks cleared", Toast.LENGTH_SHORT).show()
-                })
-            }
-        }
-    }
+    // endregion
 
-    private fun showPageZoomSheet() {
-        ChromeSheet.show(
-            context = context,
-            title = "Page zoom",
-            subtitle = "Change page text size across tabs.",
-            scrollable = false
-        ) {
-            addView(ChromeSheet.row(
-                context = context,
-                title = "Current zoom",
-                subtitle = "${browserPreferences.pageZoomPercent}%",
-                trailing = ChromeSheet.statusPill(context, "${browserPreferences.pageZoomPercent}%", true)
-            ))
-            addView(actionRow(
-                ChromeSheet.actionButton(context, "-") {
-                    browserPreferences.pageZoomPercent -= 10
-                    onPreferencesChanged()
-                    Toast.makeText(context, "Zoom ${browserPreferences.pageZoomPercent}%", Toast.LENGTH_SHORT).show()
-                },
-                ChromeSheet.actionButton(context, "+", primary = true) {
-                    browserPreferences.pageZoomPercent += 10
-                    onPreferencesChanged()
-                    Toast.makeText(context, "Zoom ${browserPreferences.pageZoomPercent}%", Toast.LENGTH_SHORT).show()
-                }
-            ))
-            addView(ChromeSheet.actionButton(context, "Reset") {
-                browserPreferences.pageZoomPercent = 100
+    // region main page
+
+    private fun mainPage() = Page("Settings") {
+        addView(KernelUi.sectionHeader(context, "General"))
+        addView(KernelUi.group(
+            context,
+            KernelUi.item(context, "Search engine", icon = R.drawable.ic_search, tile = R.color.tile_blue,
+                value = browserPreferences.searchEngine.displayName, chevron = true) { push(searchEnginePage()) },
+            KernelUi.item(context, "Homepage", icon = R.drawable.ic_home, tile = R.color.tile_green,
+                value = displayHost(browserPreferences.homepageUrl), chevron = true) { push(homepagePage()) },
+            KernelUi.toggle(context, "Start page", subtitle = "Show top sites and bookmarks in new tabs and on Home.",
+                icon = R.drawable.ic_tabs, tile = R.color.tile_teal, checked = browserPreferences.newTabPage) {
+                browserPreferences.newTabPage = it
                 onPreferencesChanged()
-                Toast.makeText(context, "Zoom reset", Toast.LENGTH_SHORT).show()
-            })
-        }
-    }
+            },
+            KernelUi.toggle(context, "Desktop site", subtitle = "Request full desktop pages by default.",
+                icon = R.drawable.ic_desktop, tile = R.color.tile_indigo, checked = browserPreferences.desktopMode) {
+                browserPreferences.desktopMode = it
+                onPreferencesChanged()
+            },
+            KernelUi.item(context, "Text size", icon = R.drawable.ic_text_size, tile = R.color.tile_orange,
+                value = "${browserPreferences.pageZoomPercent}%", chevron = true) { push(textSizePage()) },
+            KernelUi.item(context, "Autoplay", icon = R.drawable.ic_play, tile = R.color.tile_pink,
+                value = browserPreferences.autoplay.displayName, chevron = true) { push(autoplayPage()) }
+        ))
 
-    private fun showPrivacySheet() {
-        ChromeSheet.show(
-            context = context,
-            title = "Privacy & security",
-            subtitle = "Private tabs, permissions, and local data."
-        ) {
-            addView(ChromeSheet.row(
-                context = context,
-                title = "Tracking protection",
-                subtitle = "Block known trackers, cryptominers, and fingerprinting.",
-                trailing = preferenceSwitch(browserPreferences.trackingProtection) { checked ->
-                    browserPreferences.trackingProtection = checked
-                    onPreferencesChanged()
-                }
-            ))
-            addView(ChromeSheet.row(
-                context = context,
-                title = "Third-party cookies",
-                subtitle = "Isolate cross-site cookies while keeping normal sign-in working.",
-                trailing = preferenceSwitch(browserPreferences.blockThirdPartyCookies) { checked ->
-                    browserPreferences.blockThirdPartyCookies = checked
-                    onPreferencesChanged()
-                }
-            ))
-            addView(ChromeSheet.row(
-                context = context,
-                title = "Password autofill",
-                subtitle = "${loginStore.summaries().size} saved logins.",
-                trailing = preferenceSwitch(browserPreferences.loginAutofill) { checked ->
-                    browserPreferences.loginAutofill = checked
-                    onPreferencesChanged()
-                }
-            ))
-            addView(ChromeSheet.row(
-                context = context,
-                title = "Saved passwords",
-                subtitle = "Review saved login origins and clear local password data.",
-                onClick = { showSavedPasswordsSheet() }
-            ))
-            addView(ChromeSheet.row(
-                context = context,
-                title = "JavaScript",
-                subtitle = "Most sites need this; turning it off is a strict privacy mode.",
-                trailing = preferenceSwitch(browserPreferences.javascriptEnabled) { checked ->
-                    browserPreferences.javascriptEnabled = checked
-                    onPreferencesChanged()
-                }
-            ))
-            addView(ChromeSheet.row(
-                context = context,
-                title = "Private browsing",
-                subtitle = "Private tabs close on exit and block screenshots while active.",
-                trailing = ChromeSheet.statusPill(context, "On", true)
-            ))
-            addView(ChromeSheet.row(
-                context = context,
-                title = "Site data",
-                subtitle = "Clear cookies, cache, permissions, and GeckoView storage.",
-                onClick = { confirmClearData() }
-            ))
-            addView(ChromeSheet.row(
-                context = context,
-                title = "Site permissions",
-                subtitle = "Review location, notification, storage, and autoplay decisions.",
-                onClick = { showSitePermissionsSheet() }
-            ))
-            addView(ChromeSheet.row(
-                context = context,
-                title = "Extension private access",
-                subtitle = "Manage which extensions can run in private tabs.",
-                onClick = { showExtensionsSheet() }
-            ))
-        }
-    }
-
-    private fun showSitePermissionsSheet() {
-        ChromeSheet.show(
-            context = context,
-            title = "Site permissions",
-            subtitle = "Saved permission decisions."
-        ) {
-            val container = this
-            addView(ChromeSheet.note(context, "Loading saved site permissions..."))
-            runtime.storageController.allPermissions.accept({ permissions ->
-                container.removeAllViews()
-                if (permissions.isNullOrEmpty()) {
-                    container.addView(ChromeSheet.note(context, "No saved site permissions."))
-                } else {
-                    permissions.forEach { permission ->
-                        container.addView(ChromeSheet.row(
-                            context = context,
-                            title = contentPermissionName(permission.permission),
-                            subtitle = "${permission.uri} - ${permissionValueName(permission.value)}",
-                            trailing = ChromeSheet.actionButton(context, "Reset") {
-                                runtime.storageController.setPermission(
-                                    permission,
-                                    GeckoSession.PermissionDelegate.ContentPermission.VALUE_PROMPT
-                                )
-                                Toast.makeText(context, "Permission reset", Toast.LENGTH_SHORT).show()
-                            }
-                        ))
-                    }
-                }
-            }, {
-                container.removeAllViews()
-                container.addView(ChromeSheet.note(context, "Could not load site permissions."))
-            })
-        }
-    }
-
-    private fun contentPermissionName(permission: Int): String {
-        return when (permission) {
-            GeckoSession.PermissionDelegate.PERMISSION_GEOLOCATION -> "Location"
-            GeckoSession.PermissionDelegate.PERMISSION_DESKTOP_NOTIFICATION -> "Notifications"
-            GeckoSession.PermissionDelegate.PERMISSION_PERSISTENT_STORAGE -> "Persistent storage"
-            GeckoSession.PermissionDelegate.PERMISSION_AUTOPLAY_AUDIBLE -> "Audible autoplay"
-            GeckoSession.PermissionDelegate.PERMISSION_AUTOPLAY_INAUDIBLE -> "Inaudible autoplay"
-            GeckoSession.PermissionDelegate.PERMISSION_STORAGE_ACCESS -> "Storage access"
-            GeckoSession.PermissionDelegate.PERMISSION_LOCAL_NETWORK_ACCESS -> "Local network"
-            else -> "Permission"
-        }
-    }
-
-    private fun permissionValueName(value: Int): String {
-        return when (value) {
-            GeckoSession.PermissionDelegate.ContentPermission.VALUE_ALLOW -> "Allowed"
-            GeckoSession.PermissionDelegate.ContentPermission.VALUE_DENY -> "Blocked"
-            else -> "Ask"
-        }
-    }
-
-    private fun preferenceSwitch(checked: Boolean, onChanged: (Boolean) -> Unit): Switch {
-        return Switch(context).apply {
-            minWidth = ChromeSheet.dp(context, 56)
-            isChecked = checked
-            setOnCheckedChangeListener { _, value -> onChanged(value) }
-        }
-    }
-
-    private fun showSavedPasswordsSheet() {
-        ChromeSheet.show(
-            context = context,
-            title = "Saved passwords",
-            subtitle = "Usernames only; passwords are never shown here."
-        ) {
-            val logins = loginStore.summaries()
-            if (logins.isEmpty()) {
-                addView(ChromeSheet.note(context, "Saved logins will appear here after you approve a save prompt."))
-            } else {
-                logins.forEach { login ->
-                    addView(ChromeSheet.row(
-                        context = context,
-                        title = login.username,
-                        subtitle = login.origin
-                    ))
-                }
-                addView(ChromeSheet.actionButton(context, "Clear saved passwords", danger = true) {
-                    loginStore.clear()
-                    Toast.makeText(context, "Saved passwords cleared", Toast.LENGTH_SHORT).show()
-                })
+        addView(KernelUi.sectionHeader(context, "Privacy & security"))
+        addView(KernelUi.group(
+            context,
+            KernelUi.toggle(context, "Tracking protection", subtitle = "Block trackers, cryptominers, and fingerprinting.",
+                icon = R.drawable.ic_shield, tile = R.color.tile_green, checked = browserPreferences.trackingProtection) {
+                browserPreferences.trackingProtection = it
+                onPreferencesChanged()
+            },
+            KernelUi.toggle(context, "Isolate cross-site cookies", subtitle = "Stops sites following you around. Sign-ins keep working.",
+                icon = R.drawable.ic_cookie, tile = R.color.tile_orange, checked = browserPreferences.blockThirdPartyCookies) {
+                browserPreferences.blockThirdPartyCookies = it
+                onPreferencesChanged()
+            },
+            KernelUi.toggle(context, "JavaScript", subtitle = "Most sites need this. Turn off for a strict mode.",
+                icon = R.drawable.ic_code, tile = R.color.tile_gray, checked = browserPreferences.javascriptEnabled) {
+                browserPreferences.javascriptEnabled = it
+                onPreferencesChanged()
+            },
+            KernelUi.item(context, "Passwords", icon = R.drawable.ic_key, tile = R.color.tile_teal,
+                value = loginStore.summaries().size.let { if (it == 0) "None" else "$it saved" }, chevron = true) { push(passwordsPage()) },
+            KernelUi.item(context, "Site permissions", icon = R.drawable.ic_lock, tile = R.color.tile_blue, chevron = true) {
+                push(sitePermissionsPage())
+            },
+            KernelUi.item(context, "Clear browsing data", icon = R.drawable.ic_delete, tile = R.color.tile_red, chevron = true) {
+                push(clearDataPage())
             }
-        }
+        ))
+
+        addView(KernelUi.sectionHeader(context, "Extensions"))
+        addView(KernelUi.group(
+            context,
+            KernelUi.item(context, "Extensions", subtitle = "Ad blockers, password managers, dark mode, and more.",
+                icon = R.drawable.ic_extension, tile = R.color.tile_purple,
+                value = "${extensionManager.enabledCount()} on", chevron = true) { push(extensionsPage()) },
+            KernelUi.item(context, "Browse extensions", icon = R.drawable.ic_store, tile = R.color.tile_orange, chevron = true) {
+                dialog.dismiss()
+                openUrl(ExtensionsDialogController.AMO_ANDROID_URL)
+            }
+        ))
+
+        addView(KernelUi.sectionHeader(context, "Library"))
+        addView(KernelUi.group(
+            context,
+            KernelUi.item(context, "History", icon = R.drawable.ic_history, tile = R.color.tile_blue,
+                value = historyProvider().size.takeIf { it > 0 }?.toString(), chevron = true) { push(historyPage()) },
+            KernelUi.item(context, "Bookmarks", icon = R.drawable.ic_bookmark, tile = R.color.tile_orange,
+                value = bookmarksStore.entries().size.takeIf { it > 0 }?.toString(), chevron = true) { push(bookmarksPage()) },
+            KernelUi.item(context, "Downloads", icon = R.drawable.ic_download, tile = R.color.tile_green,
+                value = downloadStore.entries().size.takeIf { it > 0 }?.toString(), chevron = true) { push(downloadsPage()) }
+        ))
+
+        addView(KernelUi.sectionHeader(context, "About"))
+        addView(KernelUi.group(
+            context,
+            KernelUi.item(context, "Kernel Browser", icon = R.drawable.ic_info, tile = R.color.tile_gray,
+                value = "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})"),
+            KernelUi.item(context, "Browser engine", icon = R.drawable.ic_globe, tile = R.color.tile_gray,
+                value = "Gecko ${org.mozilla.geckoview.BuildConfig.MOZ_APP_VERSION}")
+        ))
     }
 
-    private fun showExtensionsSheet() {
-        ChromeSheet.show(
-            context = context,
-            title = "Extensions",
-            subtitle = "Install, enable, and allow private tab access."
-        ) {
-            val activeCount = AllowedExtensions.all.count { extensionPreferences.isEnabled(it) }
-            addView(ChromeSheet.row(
-                context = context,
-                title = "Extension status",
-                subtitle = "$activeCount of ${AllowedExtensions.all.size} enabled",
-                trailing = ChromeSheet.statusPill(context, if (activeCount > 0) "On" else "Off", activeCount > 0)
-            ))
-            addView(ChromeSheet.note(
+    // endregion
+
+    // region general pages
+
+    private fun searchEnginePage() = Page("Search engine") {
+        addView(KernelUi.sectionHeader(context, "Default search"))
+        addView(KernelUi.group(context, SearchEngine.all.map { engine ->
+            KernelUi.choice(
                 context,
-                "Enable an extension once. Use the Extensions button in the browser pill to open extension controls for the current page."
-            ))
-            AllowedExtensions.all.forEach { extension ->
-                addView(extensionControl(extension))
+                title = engine.displayName,
+                subtitle = if (engine.suggestionsUrl != null) "Includes search suggestions" else null,
+                selected = browserPreferences.searchEngine == engine
+            ) {
+                browserPreferences.searchEngineId = engine.id
+                onPreferencesChanged()
+                refresh()
             }
-        }
+        }))
+        addView(KernelUi.footer(context, "Used for anything you type in the address bar that isn't a web address."))
     }
 
-    private fun confirmClearData() {
-        ChromeSheet.show(
-            context = context,
-            title = "Clear data?",
-            subtitle = "This resets open tabs before clearing cookies, cache, permissions, and storage.",
-            scrollable = false
-        ) { dialog ->
-            addView(actionRow(
-                ChromeSheet.actionButton(context, "Cancel") { dialog.dismiss() },
-                ChromeSheet.actionButton(context, "Clear", danger = true) {
-                    dialog.dismiss()
-                    clearHistory()
-                    resetBrowserState()
-                    runtime.storageController.clearData(StorageController.ClearFlags.ALL).accept(
-                        { Toast.makeText(context, "Browsing data cleared", Toast.LENGTH_SHORT).show() },
-                        {
-                            SafeLog.warning("Clearing browsing data failed", it)
-                            Toast.makeText(context, "Could not clear browsing data", Toast.LENGTH_SHORT).show()
+    private fun homepagePage() = Page("Homepage") {
+        val input = EditText(context).apply {
+            setText(browserPreferences.homepageUrl)
+            setSingleLine(true)
+            textSize = 16f
+            hint = "https://example.com"
+            imeOptions = EditorInfo.IME_ACTION_DONE
+            inputType = android.text.InputType.TYPE_TEXT_VARIATION_URI or android.text.InputType.TYPE_CLASS_TEXT
+            setTextColor(context.getColor(R.color.kernel_text))
+            setHintTextColor(context.getColor(R.color.kernel_muted))
+            background = GradientDrawable().apply {
+                setColor(context.getColor(R.color.kernel_group))
+                cornerRadius = KernelUi.dp(context, 14).toFloat()
+            }
+            setPadding(KernelUi.dp(context, 16), 0, KernelUi.dp(context, 16), 0)
+        }
+        fun save() {
+            browserPreferences.homepageUrl = input.text.toString()
+            onPreferencesChanged()
+            Toast.makeText(context, "Homepage saved", Toast.LENGTH_SHORT).show()
+            pop()
+        }
+        input.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_DONE) { save(); true } else false
+        }
+        addView(KernelUi.sectionHeader(context, "Web address"))
+        addView(input, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, KernelUi.dp(context, 54)))
+        addView(View(context), LinearLayout.LayoutParams(1, KernelUi.dp(context, 14)))
+        addView(ChromeSheet.actionButton(context, "Save", primary = true) { save() })
+        addView(KernelUi.sectionHeader(context, "Quick picks"))
+        addView(KernelUi.group(context, listOf(
+            "Google" to BrowserPreferences.DEFAULT_HOMEPAGE,
+            "DuckDuckGo" to "https://duckduckgo.com",
+            "YouTube" to "https://m.youtube.com"
+        ).map { (name, url) ->
+            KernelUi.choice(context, title = name, subtitle = url, selected = browserPreferences.homepageUrl.trimEnd('/') == url) {
+                browserPreferences.homepageUrl = url
+                onPreferencesChanged()
+                refresh()
+            }
+        }))
+    }
+
+    private fun textSizePage() = Page("Text size") {
+        addView(KernelUi.sectionHeader(context, "Page text"))
+        addView(KernelUi.group(context, listOf(80, 90, 100, 110, 125, 150).map { percent ->
+            KernelUi.choice(
+                context,
+                title = if (percent == 100) "100% (default)" else "$percent%",
+                selected = browserPreferences.pageZoomPercent == percent
+            ) {
+                browserPreferences.pageZoomPercent = percent
+                onPreferencesChanged()
+                refresh()
+            }
+        }))
+        addView(TextView(context).apply {
+            text = "The quick brown fox jumps over the lazy dog."
+            textSize = 16f * browserPreferences.pageZoomPercent / 100f
+            setTextColor(context.getColor(R.color.kernel_text))
+            setPadding(KernelUi.dp(context, 18), KernelUi.dp(context, 18), KernelUi.dp(context, 18), 0)
+        })
+    }
+
+    private fun autoplayPage() = Page("Autoplay") {
+        addView(KernelUi.sectionHeader(context, "When a site tries to play media"))
+        addView(KernelUi.group(context, AutoplayPolicy.entries.map { policy ->
+            KernelUi.choice(context, title = policy.displayName, subtitle = policy.summary, selected = browserPreferences.autoplay == policy) {
+                browserPreferences.autoplay = policy
+                onPreferencesChanged()
+                refresh()
+            }
+        }))
+        addView(KernelUi.footer(context, "Tapping play always works. This only affects media that starts on its own."))
+    }
+
+    // endregion
+
+    // region privacy pages
+
+    private fun passwordsPage() = Page("Passwords") {
+        addView(KernelUi.group(context, KernelUi.toggle(
+            context,
+            "Offer to save passwords",
+            subtitle = "Fill saved sign-ins automatically.",
+            icon = R.drawable.ic_key,
+            tile = R.color.tile_teal,
+            checked = browserPreferences.loginAutofill
+        ) {
+            browserPreferences.loginAutofill = it
+            onPreferencesChanged()
+        }))
+        val logins = loginStore.summaries()
+        addView(KernelUi.sectionHeader(context, "Saved sign-ins"))
+        if (logins.isEmpty()) {
+            addView(KernelUi.group(context, KernelUi.item(context, "No saved passwords", subtitle = "Accept a save prompt after signing in to keep it here.")))
+        } else {
+            addView(KernelUi.group(context, logins.map { login ->
+                KernelUi.item(context, login.username.ifBlank { "(no username)" }, subtitle = login.origin, icon = R.drawable.ic_globe, tile = R.color.tile_gray)
+            }))
+            addView(KernelUi.sectionHeader(context, ""))
+            addView(KernelUi.group(context, KernelUi.item(context, "Delete all saved passwords", danger = true) {
+                confirm("Delete all passwords?", "This can't be undone.", "Delete") {
+                    loginStore.clear()
+                    refresh()
+                }
+            }))
+        }
+        addView(KernelUi.footer(context, "Passwords stay on this device and are never shown here."))
+    }
+
+    private fun sitePermissionsPage() = Page("Site permissions") {
+        val container = this
+        addView(KernelUi.footer(context, "Loading..."))
+        runtime.storageController.allPermissions.accept({ permissions ->
+            container.removeAllViews()
+            val saved = permissions.orEmpty().filter { it.value != GeckoSession.PermissionDelegate.ContentPermission.VALUE_PROMPT }
+            if (saved.isEmpty()) {
+                container.addView(KernelUi.sectionHeader(context, "Saved decisions"))
+                container.addView(KernelUi.group(context, KernelUi.item(context, "Nothing saved yet",
+                    subtitle = "When you allow or block something for a site, it shows up here.")))
+                return@accept
+            }
+            saved.groupBy { displayHost(it.uri) }.toSortedMap().forEach { (host, entries) ->
+                container.addView(KernelUi.sectionHeader(context, host))
+                container.addView(KernelUi.group(context, entries.map { permission ->
+                    KernelUi.item(
+                        context,
+                        title = SitePermissions.label(permission.permission),
+                        value = SitePermissions.valueLabel(permission.value),
+                        trailing = KernelUi.pill(context, "Reset", R.color.kernel_danger).apply {
+                            contentDescription = "Reset ${SitePermissions.label(permission.permission)} for $host"
+                            setOnClickListener {
+                                runtime.storageController.setPermission(permission, GeckoSession.PermissionDelegate.ContentPermission.VALUE_PROMPT)
+                                container.postDelayed({ refresh() }, 200)
+                            }
                         }
                     )
+                }))
+            }
+        }, {
+            container.removeAllViews()
+            container.addView(KernelUi.footer(context, "Could not load site permissions."))
+        })
+    }
+
+    private fun clearDataPage() = Page("Clear browsing data") {
+        addView(KernelUi.sectionHeader(context, "Choose what to clear"))
+        addView(KernelUi.group(
+            context,
+            KernelUi.item(context, "Browsing history", subtitle = "${historyProvider().size} pages", icon = R.drawable.ic_history, tile = R.color.tile_blue) {
+                confirm("Clear history?", "Removes the pages listed in History.", "Clear") {
+                    clearHistory()
+                    toast("History cleared")
+                    refresh()
                 }
-            ))
+            },
+            KernelUi.item(context, "Cookies and site data", subtitle = "Signs you out of most sites.", icon = R.drawable.ic_cookie, tile = R.color.tile_orange) {
+                confirm("Clear cookies and site data?", "You'll be signed out of most sites.", "Clear") {
+                    clearStorage(StorageController.ClearFlags.SITE_DATA, "Cookies and site data cleared")
+                }
+            },
+            KernelUi.item(context, "Cached images and files", subtitle = "Frees space. Pages may load slower once.", icon = R.drawable.ic_download, tile = R.color.tile_gray) {
+                clearStorage(StorageController.ClearFlags.ALL_CACHES, "Cache cleared")
+            },
+            KernelUi.item(context, "Site permissions", subtitle = "Location, notifications, autoplay, and more.", icon = R.drawable.ic_lock, tile = R.color.tile_teal) {
+                clearStorage(StorageController.ClearFlags.PERMISSIONS or StorageController.ClearFlags.SITE_SETTINGS, "Site permissions reset")
+            }
+        ))
+        addView(KernelUi.sectionHeader(context, ""))
+        addView(KernelUi.group(context, KernelUi.item(context, "Clear everything", subtitle = "History, site data, cache, permissions, and open tabs.",
+            icon = R.drawable.ic_delete, tile = R.color.tile_red, danger = true) {
+            confirm("Clear everything?", "Closes all tabs and removes history, cookies, cache, and permissions.", "Clear all") {
+                clearHistory()
+                resetBrowserState()
+                clearStorage(StorageController.ClearFlags.ALL, "All browsing data cleared")
+            }
+        }))
+    }
+
+    private fun clearStorage(flags: Long, done: String) {
+        runtime.storageController.clearData(flags).accept(
+            { toast(done); refresh() },
+            {
+                SafeLog.warning("Clearing browsing data failed", it)
+                toast("Could not clear data")
+            }
+        )
+    }
+
+    // endregion
+
+    // region extension and library pages
+
+    private fun extensionsPage(): Page {
+        val key = Any()
+        return Page("Extensions", onLeave = { extensionsUi.unbind(key) }) {
+            val list = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+            addView(list)
+            extensionsUi.bind(key, list) { dialog.dismiss() }
         }
     }
 
-    private fun extensionControl(extension: AllowedExtension): LinearLayout {
-        return LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
+    private fun historyPage() = Page("History") {
+        val entries = historyProvider()
+        if (entries.isEmpty()) {
+            addView(KernelUi.sectionHeader(context, "Recent"))
+            addView(KernelUi.group(context, KernelUi.item(context, "No history yet", subtitle = "Pages from normal tabs appear here. Private tabs are never saved.")))
+            return@Page
+        }
+        addView(KernelUi.sectionHeader(context, "Recent"))
+        addView(KernelUi.group(context, entries.take(60).map { (title, url) ->
+            KernelUi.item(context, title, subtitle = displayHost(url), icon = R.drawable.ic_globe, tile = R.color.tile_gray) {
+                dialog.dismiss()
+                openUrl(url)
+            }
+        }))
+        addView(KernelUi.sectionHeader(context, ""))
+        addView(KernelUi.group(context, KernelUi.item(context, "Clear history", danger = true) {
+            confirm("Clear history?", "Removes all pages listed here.", "Clear") {
+                clearHistory()
+                refresh()
+            }
+        }))
+    }
 
-            addView(ChromeSheet.row(
-                context = context,
-                title = extension.displayName,
-                subtitle = "Install and allow this extension. ${extension.permissionSummary}",
-                trailing = Switch(context).apply {
-                    contentDescription = "Enable ${extension.displayName}"
-                    minWidth = ChromeSheet.dp(context, 56)
-                    isChecked = extensionPreferences.isEnabled(extension)
-                    var internalChange = false
-                    setOnCheckedChangeListener { button, checked ->
-                        if (internalChange) return@setOnCheckedChangeListener
-                        if (checked) {
-                            internalChange = true
-                            button.isChecked = false
-                            internalChange = false
-                            confirmEnable(extension) {
-                                extensionPreferences.setEnabled(extension, true)
-                                internalChange = true
-                                button.isChecked = true
-                                internalChange = false
-                                extensionInstaller.ensureInstalled(extension)
-                            }
-                        } else {
-                            extensionPreferences.setEnabled(extension, false)
-                            extensionInstaller.disableIfInstalled(extension)
-                        }
-                    }
+    private fun bookmarksPage() = Page("Bookmarks") {
+        val bookmarks = bookmarksStore.entries()
+        addView(KernelUi.sectionHeader(context, "Saved pages"))
+        if (bookmarks.isEmpty()) {
+            addView(KernelUi.group(context, KernelUi.item(context, "No bookmarks yet", subtitle = "Use Add bookmark in the browser menu.")))
+            return@Page
+        }
+        addView(KernelUi.group(context, bookmarks.map { (title, url) ->
+            KernelUi.item(
+                context,
+                title,
+                subtitle = displayHost(url),
+                icon = R.drawable.ic_bookmark,
+                tile = R.color.tile_orange,
+                trailing = removeButton("Remove $title") {
+                    bookmarksStore.remove(url)
+                    refresh()
                 }
-            ))
+            ) {
+                dialog.dismiss()
+                openUrl(url)
+            }
+        }))
+    }
 
-            addView(ChromeSheet.row(
-                context = context,
-                title = "Private tabs",
-                subtitle = "Let ${extension.displayName} run while private browsing.",
-                trailing = Switch(context).apply {
-                    contentDescription = "Allow ${extension.displayName} in private tabs"
-                    minWidth = ChromeSheet.dp(context, 56)
-                    isChecked = extensionPreferences.isAllowedInPrivate(extension)
-                    setOnCheckedChangeListener { _, checked ->
-                        extensionPreferences.setAllowedInPrivate(extension, checked)
-                        extensionInstaller.applyPrivateMode(extension)
-                    }
+    private fun downloadsPage() = Page("Downloads") {
+        val downloads = downloadStore.entries()
+        addView(KernelUi.sectionHeader(context, "Recent"))
+        if (downloads.isEmpty()) {
+            addView(KernelUi.group(context, KernelUi.item(context, "No downloads yet", subtitle = "Files you download appear here.")))
+            return@Page
+        }
+        addView(KernelUi.group(context, downloads.take(40).map { entry ->
+            KernelUi.item(
+                context,
+                entry.title,
+                subtitle = "${downloadStatus(entry)} · ${displayHost(entry.url)}",
+                icon = R.drawable.ic_download,
+                tile = R.color.tile_green,
+                trailing = removeButton("Remove ${entry.title}") {
+                    removeDownload(entry)
+                    refresh()
                 }
-            ))
+            ) { openDownload(entry) }
+        }))
+        addView(KernelUi.sectionHeader(context, ""))
+        addView(KernelUi.group(context, KernelUi.item(context, "Clear download list", subtitle = "Files stay in your Downloads folder.", danger = true) {
+            downloadStore.clear()
+            refresh()
+        }))
+    }
+
+    // endregion
+
+    private fun removeButton(label: String, onClick: () -> Unit): ImageButton {
+        return ImageButton(context).apply {
+            setImageResource(R.drawable.ic_close)
+            imageTintList = ColorStateList.valueOf(context.getColor(R.color.kernel_muted))
+            background = KernelUi.selectableItemBackground(context)
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            contentDescription = label
+            setPadding(KernelUi.dp(context, 8), KernelUi.dp(context, 8), KernelUi.dp(context, 8), KernelUi.dp(context, 8))
+            setOnClickListener { onClick() }
+            layoutParams = LinearLayout.LayoutParams(KernelUi.dp(context, 48), KernelUi.dp(context, 48))
         }
     }
 
-    private fun confirmEnable(extension: AllowedExtension, onApproved: () -> Unit) {
-        ChromeSheet.show(
-            context = context,
-            title = "Enable ${extension.displayName}?",
-            subtitle = extension.permissionSummary,
-            scrollable = false
-        ) { dialog ->
-            addView(actionRow(
-                ChromeSheet.actionButton(context, "Cancel") { dialog.dismiss() },
-                ChromeSheet.actionButton(context, "Enable", primary = true) {
-                    dialog.dismiss()
-                    onApproved()
-                }
-            ))
-        }
-    }
-
-    private fun actionRow(left: View, right: View): LinearLayout {
-        return LinearLayout(context).apply {
-            gravity = Gravity.CENTER
-            orientation = LinearLayout.HORIZONTAL
-            addView(left, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                marginEnd = ChromeSheet.dp(context, 6)
+    private fun confirm(title: String, message: String, action: String, onConfirm: () -> Unit) {
+        ChromeSheet.show(context, title = title, subtitle = message, scrollable = false) { sheet ->
+            addView(LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                addView(ChromeSheet.actionButton(context, "Cancel") { sheet.dismiss() },
+                    LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = KernelUi.dp(context, 6) })
+                addView(ChromeSheet.actionButton(context, action, danger = true) {
+                    sheet.dismiss()
+                    onConfirm()
+                }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = KernelUi.dp(context, 6) })
             })
-            addView(right, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                marginStart = ChromeSheet.dp(context, 6)
-            })
         }
     }
 
-    private fun extensionStatus(): String {
-        val activeCount = AllowedExtensions.all.count { extensionPreferences.isEnabled(it) }
-        return "$activeCount of ${AllowedExtensions.all.size} enabled"
+    private fun toast(text: String) {
+        Toast.makeText(context, text, Toast.LENGTH_SHORT).show()
     }
 
-    private fun statusBarHeight(): Int {
-        return systemDimension("status_bar_height").coerceAtLeast(ChromeSheet.dp(context, 12))
-    }
-
-    private fun navigationBarHeight(): Int {
-        return systemDimension("navigation_bar_height").coerceAtLeast(ChromeSheet.dp(context, 12))
-    }
-
-    private fun systemDimension(name: String): Int {
-        val id = context.resources.getIdentifier(name, "dimen", "android")
-        return if (id > 0) context.resources.getDimensionPixelSize(id) else 0
-    }
-
-    private enum class RowPosition {
-        TOP,
-        MIDDLE,
-        BOTTOM,
-        SINGLE
+    private fun displayHost(url: String): String {
+        return runCatching { Uri.parse(url).host }.getOrNull()?.removePrefix("www.")?.takeIf { it.isNotBlank() } ?: url
     }
 }

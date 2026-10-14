@@ -17,6 +17,13 @@ class BrowserPreferences(context: Context) {
             preferences.edit().putString(KEY_HOMEPAGE_URL, UrlNormalizer.normalize(value)).apply()
         }
 
+    /** Show the native start page for new tabs and Home instead of loading [homepageUrl]. */
+    var newTabPage: Boolean
+        get() = preferences.getBoolean(KEY_NEW_TAB_PAGE, true)
+        set(value) {
+            preferences.edit().putBoolean(KEY_NEW_TAB_PAGE, value).apply()
+        }
+
     var desktopMode: Boolean
         get() = preferences.getBoolean(KEY_DESKTOP_MODE, false)
         set(value) {
@@ -53,6 +60,12 @@ class BrowserPreferences(context: Context) {
             preferences.edit().putInt(KEY_PAGE_ZOOM_PERCENT, value.coerceIn(70, 150)).apply()
         }
 
+    var autoplay: AutoplayPolicy
+        get() = AutoplayPolicy.byId(preferences.getString(KEY_AUTOPLAY, AutoplayPolicy.BLOCK_AUDIBLE.id))
+        set(value) {
+            preferences.edit().putString(KEY_AUTOPLAY, value.id).apply()
+        }
+
     val searchEngine: SearchEngine
         get() = SearchEngine.byId(searchEngineId)
 
@@ -64,12 +77,14 @@ class BrowserPreferences(context: Context) {
         const val DEFAULT_HOMEPAGE = "https://www.google.com"
         private const val KEY_SEARCH_ENGINE = "search_engine"
         private const val KEY_HOMEPAGE_URL = "homepage_url"
+        private const val KEY_NEW_TAB_PAGE = "new_tab_page"
         private const val KEY_DESKTOP_MODE = "desktop_mode"
         private const val KEY_TRACKING_PROTECTION = "tracking_protection"
         private const val KEY_BLOCK_THIRD_PARTY_COOKIES = "block_third_party_cookies"
         private const val KEY_LOGIN_AUTOFILL = "login_autofill"
         private const val KEY_JAVASCRIPT_ENABLED = "javascript_enabled"
         private const val KEY_PAGE_ZOOM_PERCENT = "page_zoom_percent"
+        private const val KEY_AUTOPLAY = "autoplay"
     }
 }
 
@@ -107,5 +122,15 @@ enum class SearchEngine(
         fun byId(id: String): SearchEngine {
             return all.firstOrNull { it.id == id } ?: GOOGLE
         }
+    }
+}
+
+enum class AutoplayPolicy(val id: String, val displayName: String, val summary: String) {
+    ALLOW_ALL("allow_all", "Allow audio and video", "Videos can start playing with sound."),
+    BLOCK_AUDIBLE("block_audible", "Block audio only", "Muted previews play; sound waits for a tap."),
+    BLOCK_ALL("block_all", "Block audio and video", "Nothing plays until you tap it.");
+
+    companion object {
+        fun byId(id: String?): AutoplayPolicy = entries.firstOrNull { it.id == id } ?: BLOCK_AUDIBLE
     }
 }

@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <strong>Safari-inspired chrome &middot; address suggestions &middot; private tabs &middot; bundled extensions</strong><br>
+  <strong>Safari-inspired chrome &middot; address suggestions &middot; private tabs &middot; install any Firefox extension</strong><br>
   <sub>Kernel Browser is an Android browser shell around Mozilla GeckoView with native Kotlin UI, smooth settings sheets, square tab previews, history autofill, Google recommendations, and allowlisted WebExtension support.</sub>
 </p>
 
@@ -57,8 +57,10 @@ Android UI -> BrowserTabs -> GeckoSession -> GeckoView
 | **Tab Management** | Normal/private tab modes, a clean square tab panel, and live page thumbnails. |
 | **Private Tabs** | Private tabs are separated and closed when the app exits. |
 | **History** | The settings sheet can show and clear browsing history. |
-| **Extensions** | Allowlisted WebExtensions with permission summaries and private-tab toggles. |
+| **Extensions** | Install any Mozilla-signed extension from addons.mozilla.org, an `.xpi` link, or a file, with a plain-English permission prompt and a full manager. |
 | **Bundled Blocking** | uBlock Origin is enabled by default when extension assets are fetched. |
+| **Video** | Real fullscreen with auto-rotate, screen kept awake while playing, and a silent autoplay policy. |
+| **Settings** | Grouped full-screen settings with live values, sub-pages, and granular data clearing. |
 
 ---
 
@@ -76,7 +78,11 @@ cd Kernel-browser
 Extension binaries are generated assets and are ignored by Git. Fetch the pinned allowlist before testing extension behavior:
 
 ```powershell
-.\scripts\fetch_extensions.ps1 -Clean
+.\scripts\fetch_extensions.ps1 -Clean      # Windows
+```
+
+```sh
+scripts/fetch_extensions.sh --clean         # Linux / macOS / CI
 ```
 
 ### 3. Build
@@ -162,20 +168,24 @@ The fetch script downloads official AMO XPI artifacts, verifies SHA-256 checksum
 | Extension | Default |
 |---|---|
 | **uBlock Origin** | Enabled |
-| **Cookie-Editor** | Disabled |
+| **Cookie-Editor** | Offered under Recommended |
+
+Any other extension can be installed at runtime: **Extensions → Browse extensions** opens
+addons.mozilla.org, where **Add to Firefox** shows Kernel's install prompt. Extensions must be
+signed by Mozilla.
 
 ---
 
 ## Release Notes
 
-Latest release notes are in [docs/releases/v1.10.md](docs/releases/v1.10.md).
+Latest release notes are in [docs/releases/v1.11.md](docs/releases/v1.11.md).
+The QA report with before/after screenshots is in [docs/qa/README.md](docs/qa/README.md).
 
 ---
 
 ## Roadmap
 
 - Smooth out tab thumbnails across background tabs.
-- Add a first-run onboarding screen for extension permissions.
 - Add signed CI release builds for ABI split APKs.
 - Keep refining settings, extensions, and tabs around the same Safari-like motion system.
 

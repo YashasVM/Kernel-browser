@@ -196,7 +196,7 @@ object ChromeSheet {
             textSize = 15f
             setTextColor(
                 when {
-                    primary -> Color.WHITE
+                    primary -> context.getColor(R.color.kernel_on_accent)
                     danger -> context.getColor(R.color.kernel_danger)
                     else -> context.getColor(R.color.kernel_accent)
                 }

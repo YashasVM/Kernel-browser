@@ -4,9 +4,10 @@ import android.content.Context
 
 class BookmarksStore(context: Context) {
     private val preferences = context.getSharedPreferences("browser_bookmarks", Context.MODE_PRIVATE)
+    private var cache: List<Pair<String, String>>? = null
 
     fun entries(): List<Pair<String, String>> {
-        return BrowserHistoryCodec.decode(preferences.getString(KEY_ENTRIES, ""))
+        return cache ?: BrowserHistoryCodec.decode(preferences.getString(KEY_ENTRIES, "")).also { cache = it }
     }
 
     fun isBookmarked(url: String): Boolean {
@@ -34,10 +35,12 @@ class BookmarksStore(context: Context) {
     }
 
     fun clear() {
+        cache = emptyList()
         preferences.edit().remove(KEY_ENTRIES).apply()
     }
 
     private fun save(entries: List<Pair<String, String>>) {
+        cache = entries
         preferences.edit().putString(KEY_ENTRIES, BrowserHistoryCodec.encode(entries)).apply()
     }
 
