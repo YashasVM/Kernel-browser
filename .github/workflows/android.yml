@@ -1,0 +1,136 @@
+name: Android CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # AGP 9.x needs JDK 17+ to run Gradle; 21 is used for headroom. The app
+  # itself still compiles to Java 17 bytecode (see app/build.gradle.kts).
+  JAVA_VERSION: "21"
+
+jobs:
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Run unit tests
+        run: |
+          chmod +x gradlew
+          ./gradlew testDebugUnitTest --no-daemon
+
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-reports
+          path: |
+            app/build/reports/tests/
+            app/build/test-results/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  build:
+    name: Release APKs
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Cache extension downloads
+        uses: actions/cache@v4
+        with:
+          path: extensions-cache/
+          key: extensions-${{ hashFiles('scripts/fetch_extensions.sh') }}
+
+      - name: Fetch bundled extensions
+        run: |
+          if [ ! -f scripts/fetch_extensions.sh ]; then
+            echo "::error::scripts/fetch_extensions.sh is missing; APKs would ship without bundled extensions."
+            exit 1
+          fi
+          sh scripts/fetch_extensions.sh --clean
+
+      - name: Assemble release APKs
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon
+
+      - name: Verify bundled extensions in APKs
+        run: sh scripts/verify_apks.sh app/build/outputs/installable
+
+      - name: Locate APKs
+        id: apks
+        run: |
+          dir=app/build/outputs/installable
+          for abi in arm64-v8a armeabi-v7a x86_64; do
+            set -- "$dir"/*-"$abi".apk
+            if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+              echo "::error::Expected exactly one $abi APK in $dir, found: $*"
+              exit 1
+            fi
+            key=$(echo "$abi" | tr -c 'a-z0-9\n' '_')
+            echo "${key}=$1" >> "$GITHUB_OUTPUT"
+            echo "${key}_name=$(basename "$1" .apk)" >> "$GITHUB_OUTPUT"
+          done
+          ls -lh "$dir"
+          df -h .
+
+      - name: Upload arm64-v8a APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.apks.outputs.arm64_v8a_name }}
+          path: ${{ steps.apks.outputs.arm64_v8a }}
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: error
+
+      - name: Upload armeabi-v7a APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.apks.outputs.armeabi_v7a_name }}
+          path: ${{ steps.apks.outputs.armeabi_v7a }}
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: error
+
+      - name: Upload x86_64 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.apks.outputs.x86_64_name }}
+          path: ${{ steps.apks.outputs.x86_64 }}
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: error
