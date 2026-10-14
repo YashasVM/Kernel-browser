@@ -369,6 +369,7 @@ class MainActivity : Activity() {
         }
         configureFindBar()
         configurePullToRefresh()
+        configureAddressSwipe()
         binding.extensionsButton.setOnClickListener {
             setChromeVisible(true)
             extensionsUi.show()
@@ -899,9 +900,11 @@ class MainActivity : Activity() {
     private fun localAddressSuggestions(query: String): List<AddressSuggestion> {
         val normalizedQuery = query.lowercase()
         val bookmarkUrls = bookmarksStore.entries().map { it.second }.toSet()
-        val history = (bookmarksStore.entries() + historyStore.entries()).distinctBy { it.second }
+        // Older builds could record about:blank and similar; only suggest real web pages.
+        fun isWeb(entry: Pair<String, String>) = entry.second.startsWith("https://") || entry.second.startsWith("http://")
+        val history = (bookmarksStore.entries() + historyStore.entries()).filter(::isWeb).distinctBy { it.second }
         val matches = if (query.isBlank()) {
-            historyStore.entries().take(5)
+            historyStore.entries().filter(::isWeb).take(5)
         } else {
             history.filter { (title, url) ->
                 title.lowercase().contains(normalizedQuery) || url.lowercase().contains(normalizedQuery)
@@ -2344,6 +2347,63 @@ class MainActivity : Activity() {
         saveNormalSession()
         updateUi()
         if (!tab.isPrivate && tab.url.isNotBlank()) showMessage("Tab closed", "Undo", ::undoCloseTab)
+    }
+
+    /** Swipe the address bar sideways to move between tabs, like Safari. Taps still edit. */
+    @android.annotation.SuppressLint("ClickableViewAccessibility")
+    private fun configureAddressSwipe() {
+        val slop = android.view.ViewConfiguration.get(this).scaledTouchSlop
+        val trigger = ChromeSheet.dp(this, 56)
+        var downX = 0f
+        var downY = 0f
+        var swiping = false
+        binding.addressBar.setOnTouchListener { view, event ->
+            if (binding.addressBar.hasFocus()) return@setOnTouchListener false
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downX = event.rawX
+                    downY = event.rawY
+                    swiping = false
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = event.rawX - downX
+                    if (!swiping && kotlin.math.abs(dx) > slop * 2 && kotlin.math.abs(dx) > kotlin.math.abs(event.rawY - downY) * 2) {
+                        swiping = true
+                        // Stop the EditText from treating this as a tap that focuses it.
+                        view.cancelLongPress()
+                        view.onTouchEvent(MotionEvent.obtain(event).apply { action = MotionEvent.ACTION_CANCEL })
+                    }
+                    if (swiping) {
+                        binding.addressBar.translationX = dx * 0.35f
+                        binding.addressBar.alpha = 1f - (kotlin.math.abs(dx) / (trigger * 4f)).coerceAtMost(0.5f)
+                        return@setOnTouchListener true
+                    }
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> if (swiping) {
+                    val dx = event.rawX - downX
+                    swiping = false
+                    val switched = event.actionMasked == MotionEvent.ACTION_UP &&
+                        kotlin.math.abs(dx) >= trigger && switchAdjacentTab(if (dx < 0) 1 else -1)
+                    val from = if (switched) -binding.addressBar.translationX else binding.addressBar.translationX
+                    binding.addressBar.translationX = from
+                    binding.addressBar.animate().translationX(0f).alpha(1f).setDuration(220L)
+                        .setInterpolator(chromeInterpolator).start()
+                    return@setOnTouchListener true
+                }
+            }
+            false
+        }
+    }
+
+    /** Moves to the next (+1) or previous (-1) tab of the same kind; false at either end. */
+    private fun switchAdjacentTab(direction: Int): Boolean {
+        val current = tabs.activeTab ?: return false
+        val siblings = tabs.all().filter { it.mode == current.mode }
+        val target = siblings.getOrNull(siblings.indexOf(current) + direction) ?: return false
+        binding.addressBar.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+        attachTab(target)
+        setChromeVisible(true)
+        return true
     }
 
     private fun configurePullToRefresh() {
