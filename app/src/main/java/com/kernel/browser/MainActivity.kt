@@ -85,6 +85,7 @@ class MainActivity : Activity() {
     private var addressEdited = false
     private var settingAddressText = false
     private var findActive = false
+    private var tabSwitcherPending = false
     private var suggestionsVisible = false
     private var suggestionRequestId = 0
     private val searchRecommendationCache = object : LinkedHashMap<String, List<String>>(64, 0.75f, true) {
@@ -263,7 +264,7 @@ class MainActivity : Activity() {
     private fun returnToParentTab(tab: BrowserTab): Boolean {
         val parent = parentTabOf(tab) ?: return false
         rememberClosedTab(tab)
-        tabThumbnails.remove(tab.id)?.recycle()
+        tabThumbnails.remove(tab.id)
         tabs.close(tab.id)
         attachTab(parent)
         saveNormalSession()
@@ -520,7 +521,7 @@ class MainActivity : Activity() {
             override fun onCloseRequest(session: GeckoSession) {
                 if (fullScreenSession == session) onFullScreenChanged(session, false)
                 rememberClosedTab(tab)
-                tabThumbnails.remove(tab.id)?.recycle()
+                tabThumbnails.remove(tab.id)
                 tabs.close(tab.id)
                 attachCurrentOrCreate()
                 saveNormalSession()
@@ -1999,7 +2000,21 @@ class MainActivity : Activity() {
 
     private fun showTabsDialog() {
         cancelChromeAutoHide()
-        tabs.activeTab?.let { captureThumbnail(it) }
+        if (tabSwitcherPending) return
+        tabSwitcherPending = true
+        // Open with a fresh snapshot of the current page, but never wait long for it.
+        var opened = false
+        val open = Runnable {
+            if (opened || isFinishing) return@Runnable
+            opened = true
+            tabSwitcherPending = false
+            openTabSwitcher()
+        }
+        tabs.activeTab?.let { tab -> captureThumbnail(tab) { chromeHandler.post(open) } } ?: chromeHandler.post(open)
+        chromeHandler.postDelayed(open, THUMBNAIL_WAIT_MS)
+    }
+
+    private fun openTabSwitcher() {
         TabSwitcherDialogController(
             context = this,
             tabs = tabs,
@@ -2099,19 +2114,26 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun captureThumbnail(tab: BrowserTab) {
-        if (tab.session != tabs.activeTab?.session || binding.geckoView.width <= 0 || binding.geckoView.height <= 0) return
+    /**
+     * Snapshots the visible page for the tab switcher. Old thumbnails are dropped, not recycled:
+     * an open switcher may still be drawing one, and recycling it there crashes the app.
+     */
+    private fun captureThumbnail(tab: BrowserTab, onDone: (() -> Unit)? = null) {
+        if (tab.session != tabs.activeTab?.session || binding.geckoView.width <= 0 || binding.geckoView.height <= 0) {
+            onDone?.invoke()
+            return
+        }
         binding.geckoView.capturePixels().accept({ bitmap ->
-            val source = bitmap ?: return@accept
-            val targetSize = ChromeSheet.dp(this, 240).coerceAtLeast(1)
-            val scaled = Bitmap.createScaledBitmap(source, targetSize, targetSize, true)
-            tabThumbnails.remove(tab.id)?.recycle()
-            tabThumbnails[tab.id] = scaled
-            if (source !== scaled) {
-                source.recycle()
+            if (bitmap != null) {
+                val targetSize = ChromeSheet.dp(this, 240).coerceAtLeast(1)
+                val scaled = Bitmap.createScaledBitmap(bitmap, targetSize, targetSize, true)
+                tabThumbnails[tab.id] = scaled
+                if (bitmap !== scaled) bitmap.recycle()
             }
+            onDone?.invoke()
         }, {
             // Thumbnails are best-effort; browsing should never wait on capture.
+            onDone?.invoke()
         })
     }
 
@@ -2224,7 +2246,7 @@ class MainActivity : Activity() {
 
     private fun closeTabWithUndo(tab: BrowserTab) {
         rememberClosedTab(tab)
-        tabThumbnails.remove(tab.id)?.recycle()
+        tabThumbnails.remove(tab.id)
         tabs.close(tab.id)
         attachCurrentOrCreate()
         saveNormalSession()
@@ -2480,5 +2502,6 @@ class MainActivity : Activity() {
         const val SESSION_SAVE_DELAY_MS = 1_500L
         const val SUGGESTION_DEBOUNCE_MS = 150L
         const val SUGGESTION_ROW_DP = 54
+        const val THUMBNAIL_WAIT_MS = 300L
     }
 }
