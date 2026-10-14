@@ -1318,8 +1318,14 @@ class MainActivity : Activity() {
     private fun toggleBookmark() {
         val tab = tabs.activeTab ?: return
         if (tab.url.isBlank()) return
-        val saved = bookmarksStore.toggle(tab.title, tab.url)
-        showMessage(if (saved) "Bookmark added" else "Bookmark removed")
+        val title = tab.title
+        val url = tab.url
+        val saved = bookmarksStore.toggle(title, url)
+        if (saved) {
+            showMessage("Bookmark added")
+        } else {
+            showMessage("Bookmark removed", "Undo") { bookmarksStore.add(title, url) }
+        }
         updateUi()
     }
 
