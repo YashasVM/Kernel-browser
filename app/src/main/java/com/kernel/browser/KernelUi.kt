@@ -199,10 +199,11 @@ object KernelUi {
     ): LinearLayout {
         val switch = Switch(context).apply {
             isChecked = checked
-            contentDescription = title
-            setOnCheckedChangeListener { _, value -> onChanged(value) }
+            // The row is the single accessibility focus stop; it announces the state below.
+            isFocusable = false
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
         }
-        return item(
+        val row = item(
             context = context,
             title = title,
             subtitle = subtitle,
@@ -211,6 +212,19 @@ object KernelUi {
             trailing = switch,
             onClick = { switch.toggle() }
         )
+        fun describe(value: Boolean) {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                row.stateDescription = if (value) "On" else "Off"
+            } else {
+                row.contentDescription = listOfNotNull(title, subtitle, if (value) "On" else "Off").joinToString(", ")
+            }
+        }
+        describe(checked)
+        switch.setOnCheckedChangeListener { _, value ->
+            describe(value)
+            onChanged(value)
+        }
+        return row
     }
 
     /** A single-choice row with a check mark on the selected option. */
@@ -235,7 +249,9 @@ object KernelUi {
                 setColor(context.getColor(R.color.kernel_surface_alt))
                 cornerRadius = dp(context, 12).toFloat()
             }
-            setPadding(dp(context, 10), dp(context, 4), dp(context, 10), dp(context, 4))
+            setPadding(dp(context, 12), dp(context, 4), dp(context, 12), dp(context, 4))
+            minHeight = dp(context, 36)
+            minWidth = dp(context, 56)
         }
     }
 

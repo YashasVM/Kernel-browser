@@ -28,6 +28,13 @@ class ExtensionsDialogController(
     private val pickExtensionFile: () -> Unit
 ) {
     private val refreshers = linkedMapOf<Any, () -> Unit>()
+    private val pendingPrompts = mutableListOf<() -> Unit>()
+
+    /** Answers "no" to any install prompt still open, e.g. when the activity is destroyed. */
+    fun cancelPendingPrompts() {
+        pendingPrompts.toList().forEach { it() }
+        pendingPrompts.clear()
+    }
 
     /** Called by the activity whenever installs, toggles, or browser actions change. */
     fun onExtensionsChanged() {
@@ -125,7 +132,7 @@ class ExtensionsDialogController(
     }
 
     private fun installedRow(extension: WebExtension, openOnTap: Boolean, dismiss: () -> Unit): View {
-        val enabled = extension.metaData.enabled
+        val enabled = manager.isEnabled(extension)
         val action = actionRegistry.entry(extension.id)?.takeIf { enabled && it.enabled }
         val subtitle = when {
             !enabled -> "Off"
@@ -146,7 +153,7 @@ class ExtensionsDialogController(
             background = KernelUi.selectableItemBackground(context)
             contentDescription = "${manager.displayName(extension)} details"
             setOnClickListener { showDetails(extension, dismiss) }
-            layoutParams = LinearLayout.LayoutParams(KernelUi.dp(context, 40), KernelUi.dp(context, 40))
+            layoutParams = LinearLayout.LayoutParams(KernelUi.dp(context, 48), KernelUi.dp(context, 48))
         }
         val trailing = LinearLayout(context).apply {
             gravity = Gravity.CENTER_VERTICAL
@@ -177,16 +184,17 @@ class ExtensionsDialogController(
             subtitle = allowed.permissionSummary,
             icon = R.drawable.ic_extension,
             tile = R.color.tile_purple,
-            trailing = KernelUi.pill(context, "Add"),
+            trailing = KernelUi.pill(context, "Add").apply { contentDescription = "Add ${allowed.displayName}" },
             onClick = { manager.addBundled(allowed) }
         )
     }
 
     private fun extensionIcon(extension: WebExtension): View {
         val bitmap = manager.icon(extension.id)
-        val tile = if (extension.metaData.enabled) R.color.tile_purple else R.color.tile_gray
+        val enabled = manager.isEnabled(extension)
+        val tile = if (enabled) R.color.tile_purple else R.color.tile_gray
         return KernelUi.bitmapTile(context, bitmap, R.drawable.ic_extension, tile).apply {
-            alpha = if (extension.metaData.enabled) 1f else 0.5f
+            alpha = if (enabled) 1f else 0.5f
         }
     }
 
@@ -222,7 +230,7 @@ class ExtensionsDialogController(
                 title = "Enabled",
                 icon = R.drawable.ic_extension,
                 tile = R.color.tile_purple,
-                checked = meta.enabled
+                checked = manager.isEnabled(extension)
             ) { checked -> manager.setEnabled(extension, checked) },
             KernelUi.toggle(
                 context,
@@ -235,7 +243,7 @@ class ExtensionsDialogController(
         ))
 
         val actions = mutableListOf<View>()
-        actionRegistry.entry(extension.id)?.takeIf { meta.enabled && it.enabled }?.let { action ->
+        actionRegistry.entry(extension.id)?.takeIf { manager.isEnabled(extension) && it.enabled }?.let { action ->
             actions += KernelUi.item(context, title = "Open controls", icon = R.drawable.ic_play, tile = R.color.tile_blue, chevron = true) {
                 dialog.dismiss()
                 dismissParent()
@@ -300,11 +308,15 @@ class ExtensionsDialogController(
     ) {
         var answered = false
         var allowPrivate = false
+        lateinit var cancel: () -> Unit
         fun answer(granted: Boolean) {
             if (answered) return
             answered = true
+            pendingPrompts.remove(cancel)
             onResult(granted, granted && allowPrivate)
         }
+        cancel = { answer(false) }
+        pendingPrompts += cancel
         val name = manager.displayName(extension)
         val lines = ExtensionPermissions.describe(permissions, origins)
         val dialog = ChromeSheet.show(
@@ -343,12 +355,16 @@ class ExtensionsDialogController(
 
     fun confirmOptionalPermissions(extension: WebExtension, lines: List<String>, onResult: (Boolean) -> Unit) {
         var answered = false
+        lateinit var cancel: () -> Unit
         fun answer(allowed: Boolean) {
             if (!answered) {
                 answered = true
+                pendingPrompts.remove(cancel)
                 onResult(allowed)
             }
         }
+        cancel = { answer(false) }
+        pendingPrompts += cancel
         val dialog = ChromeSheet.show(
             context = context,
             title = "${manager.displayName(extension)} wants more access",

@@ -87,6 +87,12 @@ class SettingsDialogController(
             stack.forEach { it.page.onLeave() }
             stack.clear()
         }
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            // Android 13+ (always on 16 with targetSdk 36) skips the key listener above.
+            dialog.onBackInvokedDispatcher.registerOnBackInvokedCallback(
+                android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT
+            ) { pop() }
+        }
         push(mainPage(), animate = false)
         dialog.show()
     }
@@ -420,6 +426,7 @@ class SettingsDialogController(
                         title = SitePermissions.label(permission.permission),
                         value = SitePermissions.valueLabel(permission.value),
                         trailing = KernelUi.pill(context, "Reset", R.color.kernel_danger).apply {
+                            contentDescription = "Reset ${SitePermissions.label(permission.permission)} for $host"
                             setOnClickListener {
                                 runtime.storageController.setPermission(permission, GeckoSession.PermissionDelegate.ContentPermission.VALUE_PROMPT)
                                 container.postDelayed({ refresh() }, 200)
@@ -577,7 +584,7 @@ class SettingsDialogController(
             contentDescription = label
             setPadding(KernelUi.dp(context, 8), KernelUi.dp(context, 8), KernelUi.dp(context, 8), KernelUi.dp(context, 8))
             setOnClickListener { onClick() }
-            layoutParams = LinearLayout.LayoutParams(KernelUi.dp(context, 40), KernelUi.dp(context, 40))
+            layoutParams = LinearLayout.LayoutParams(KernelUi.dp(context, 48), KernelUi.dp(context, 48))
         }
     }
 

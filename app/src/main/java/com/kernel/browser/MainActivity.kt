@@ -96,7 +96,7 @@ class MainActivity : Activity() {
     private val saveSessionRunnable = Runnable { saveNormalSession() }
     private val suggestionExecutor = Executors.newSingleThreadExecutor()
     private var pendingSuggestionQuery: Runnable? = null
-    private var pendingDownload: WebResponse? = null
+    private val pendingDownloads = mutableListOf<WebResponse>()
     private var extensionActiveSession: GeckoSession? = null
 
     private data class AddressSuggestion(
@@ -155,6 +155,7 @@ class MainActivity : Activity() {
 
         configureToolbar()
         configureInsets()
+        registerBackCallback()
         updateUi()
     }
 
@@ -194,12 +195,31 @@ class MainActivity : Activity() {
             saveNormalSession()
             tabs.closePrivateTabs()
         }
+        extensionsUi.cancelPendingPrompts()
         extensionManager.host = null
         suggestionExecutor.shutdownNow()
         super.onDestroy()
     }
 
+    @Deprecated("Kept for Android 12 and older; newer versions use the OnBackInvokedCallback below.")
     override fun onBackPressed() {
+        if (!handleBack()) super.onBackPressed()
+    }
+
+    /**
+     * On Android 13+ (and always on Android 16 for targetSdk 36) the system no longer calls
+     * onBackPressed, so Back is routed through an OnBackInvokedCallback instead.
+     */
+    private fun registerBackCallback() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        onBackInvokedDispatcher.registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT) {
+            // Nothing left to go back to: leave like the platform does for a root activity.
+            if (!handleBack()) moveTaskToBack(true)
+        }
+    }
+
+    /** Returns true when Back was consumed inside the browser. */
+    private fun handleBack(): Boolean {
         val tab = tabs.activeTab
         if (fullScreenSession != null) {
             fullScreenSession?.exitFullScreen()
@@ -210,8 +230,9 @@ class MainActivity : Activity() {
         } else if (tab?.canGoBack == true) {
             tab.session.goBack()
         } else {
-            super.onBackPressed()
+            return false
         }
+        return true
     }
 
     private fun restoreTabsOrCreateHome(intent: Intent?) {
@@ -633,7 +654,8 @@ class MainActivity : Activity() {
                 request: GeckoSession.NavigationDelegate.LoadRequest
             ): GeckoResult<AllowOrDeny>? {
                 if (isExtensionPackage(request.uri, null)) {
-                    extensionManager.install(request.uri)
+                    // Pages can't pop install prompts on their own (redirects, scripted loads).
+                    if (request.hasUserGesture || request.isDirectNavigation) extensionManager.install(request.uri)
                     return GeckoResult.fromValue(AllowOrDeny.DENY)
                 }
                 return GeckoResult.fromValue(AllowOrDeny.ALLOW)
@@ -1016,7 +1038,7 @@ class MainActivity : Activity() {
                 addView(quickAction(R.drawable.ic_add, "New tab", run {
                     val newTab = tabs.create(TabMode.NORMAL)
                     attachTab(newTab)
-                    newTab.session.loadUri(browserPreferences.homepageUrl)
+                    openHome(newTab)
                     binding.addressBar.requestFocus()
                 }))
             }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
@@ -1534,8 +1556,10 @@ class MainActivity : Activity() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
             checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
         ) {
-            pendingDownload = response
-            requestPermissions(arrayOf(android.Manifest.permission.WRITE_EXTERNAL_STORAGE), REQUEST_STORAGE_PERMISSION)
+            pendingDownloads += response
+            if (pendingDownloads.size == 1) {
+                requestPermissions(arrayOf(android.Manifest.permission.WRITE_EXTERNAL_STORAGE), REQUEST_STORAGE_PERMISSION)
+            }
             return
         }
         enqueueDownload(response, publicDownloads = true)
@@ -1630,11 +1654,11 @@ class MainActivity : Activity() {
         grantResults: IntArray
     ) {
         if (requestCode == REQUEST_STORAGE_PERMISSION) {
-            val download = pendingDownload
-            pendingDownload = null
+            val downloads = pendingDownloads.toList()
+            pendingDownloads.clear()
             val granted = grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }
             // Without the permission, fall back to the app's own Downloads folder instead of failing.
-            download?.let { enqueueDownload(it, publicDownloads = granted) }
+            downloads.forEach { enqueueDownload(it, publicDownloads = granted) }
             return
         }
         if (requestCode == REQUEST_ANDROID_PERMISSIONS) {
@@ -1748,9 +1772,11 @@ class MainActivity : Activity() {
         playingSessions -= tab.session
         updateKeepScreenOn()
         if (fullScreenSession == tab.session) onFullScreenChanged(tab.session, false)
+        if (extensionActiveSession == tab.session) extensionActiveSession = null
         if (!tab.session.isOpen) tab.session.open(runtime)
         if (tab == tabs.activeTab) {
-            tab.session.loadUri(tab.url.ifBlank { browserPreferences.homepageUrl })
+            markExtensionActiveTab(tab.session)
+            if (tab.url.isBlank()) openHome(tab) else tab.session.loadUri(tab.url)
             message?.let { Toast.makeText(this, it, Toast.LENGTH_SHORT).show() }
         }
     }
@@ -1783,7 +1809,9 @@ class MainActivity : Activity() {
         Thread {
             val copied = runCatching {
                 val dir = File(cacheDir, "xpi").apply { mkdirs() }
-                dir.listFiles()?.forEach { it.delete() }
+                // Clear leftovers from earlier sessions only; a recent file may belong to an
+                // install whose permission prompt is still open.
+                dir.listFiles()?.filter { System.currentTimeMillis() - it.lastModified() > 60 * 60 * 1000L }?.forEach { it.delete() }
                 val target = File(dir, "install-${System.currentTimeMillis()}.xpi")
                 contentResolver.openInputStream(uri)!!.use { input ->
                     target.outputStream().use { input.copyTo(it) }
@@ -1959,8 +1987,13 @@ class MainActivity : Activity() {
             captureThumbnail(active)
             fullScreenSession?.takeIf { it == active.session && active != tab }?.exitFullScreen()
         }
-        // If the fullscreen tab disappeared (closed or crashed), don't leave the UI stuck immersive.
-        fullScreenSession?.takeIf { it != tab.session }?.let { onFullScreenChanged(it, false) }
+        // Leaving the fullscreen tab (switching, window.open, close, crash) must exit page
+        // fullscreen too, or Back can no longer get out of it. tabs.create() has already made the
+        // new tab "active" here, so compare against the fullscreen session directly.
+        fullScreenSession?.takeIf { it != tab.session }?.let {
+            if (it.isOpen) it.exitFullScreen()
+            onFullScreenChanged(it, false)
+        }
         tabs.select(tab.id)
         markExtensionActiveTab(tab.session)
         binding.geckoView.setSession(tab.session)

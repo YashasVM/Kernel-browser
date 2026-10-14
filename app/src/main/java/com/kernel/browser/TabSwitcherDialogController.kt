@@ -266,7 +266,7 @@ class TabSwitcherDialogController(
 
     private fun tabCard(tab: BrowserTab, active: Boolean, thumbHeight: Int): View {
         val title = TabSwitcherLogic.displayTitle(tab.title, tab.url, tab.isPrivate)
-        val hostLabel = TabSwitcherLogic.displayHost(tab.url).ifEmpty { if (tab.isPrivate) "Private" else "Blank page" }
+        val hostLabel = TabSwitcherLogic.displayHost(tab.url).ifEmpty { if (tab.isPrivate) "Private" else "Start page" }
         val radius = dp(16).toFloat()
 
         lateinit var card: SwipeCard

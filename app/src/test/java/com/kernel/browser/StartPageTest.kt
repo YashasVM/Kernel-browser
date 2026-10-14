@@ -143,4 +143,17 @@ class StartPageTest {
         assertNull(StartPage.safeHref("https:///nohost"))
         assertEquals("https://example.com", StartPage.safeHref("https://example.com"))
     }
+
+    @Test
+    fun `top site favicons are css backgrounds so a missing icon shows the letter`() {
+        val html = StartPage.render(
+            bookmarks = emptyList(),
+            topSites = StartPage.topSites(listOf("Example" to "https://www.example.com/page", "Local" to "http://10.0.2.2:8000/")),
+            searchEngine = SearchEngine.GOOGLE
+        )
+
+        assertFalse(html.contains("<img"))
+        assertTrue(html.contains("background-image:url(&quot;https://www.example.com/favicon.ico&quot;)"))
+        assertTrue(html.contains(">10.0.2.2:8000<") || html.contains(">10.0.2.2<"))
+    }
 }

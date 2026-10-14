@@ -113,10 +113,12 @@ object StartPage {
                 sb.append("<span class=\"icon\" style=\"background:").append(colorFor(site.host)).append("\">")
                     .append(escape(letter))
                 val faviconHost = hostForFavicon(href)
-                if (faviconHost.isNotBlank()) {
+                // A CSS background (not <img>) so a missing favicon draws nothing and the letter
+                // underneath stays visible, without needing script for an onerror fallback.
+                if (faviconHost.matches(SAFE_HOST)) {
                     val scheme = if (href.startsWith("http://", ignoreCase = true)) "http" else "https"
-                    sb.append("<img src=\"").append(escape("$scheme://$faviconHost/favicon.ico"))
-                        .append("\" alt=\"\" width=\"28\" height=\"28\" loading=\"lazy\">")
+                    sb.append("<span class=\"fav\" style=\"background-image:url(&quot;")
+                        .append("$scheme://$faviconHost/favicon.ico").append("&quot;)\"></span>")
                 }
                 sb.append("</span><span class=\"label\">").append(escape(label)).append("</span></a>")
             }
@@ -208,10 +210,13 @@ object StartPage {
     private fun displayHost(host: String): String = host.lowercase(Locale.ROOT).removePrefix("www.")
 
     private fun siteName(host: String): String {
+        if (host.contains(':') || host.all { it.isDigit() || it == '.' }) return host
         val labels = host.split('.')
         val name = if (labels.size >= 2) labels[labels.size - 2] else host
         return name.replaceFirstChar { it.titlecase(Locale.ROOT) }
     }
+
+    private val SAFE_HOST = Regex("^[a-z0-9.-]+(:[0-9]{1,5})?$")
 
     private fun firstLetter(label: String): String {
         val ch = label.firstOrNull { it.isLetterOrDigit() } ?: return "?"
@@ -237,7 +242,7 @@ object StartPage {
         .grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px 8px;background:#2C2D31;border-radius:20px;padding:16px 8px}
         .tile{display:flex;flex-direction:column;align-items:center;text-decoration:none;color:#F2F3F5;min-width:0}
         .icon{position:relative;display:flex;align-items:center;justify-content:center;width:52px;height:52px;border-radius:50%;color:#fff;font-weight:700;font-size:21px;overflow:hidden;flex:none}
-        .icon img{position:absolute;left:12px;top:12px;width:28px;height:28px;border:0}
+        .icon .fav{position:absolute;left:12px;top:12px;width:28px;height:28px;background-size:contain;background-repeat:no-repeat;background-position:center}
         .icon.small{width:36px;height:36px;font-size:16px}
         .label{margin-top:8px;font-size:13px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
         .list{list-style:none;margin:0;padding:4px 0;background:#2C2D31;border-radius:20px}

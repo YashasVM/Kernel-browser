@@ -49,9 +49,10 @@ class ExtensionManager(
     private val installed = linkedMapOf<String, WebExtension>()
     private val icons = mutableMapOf<String, Bitmap>()
     private val pendingInstalls = mutableSetOf<String>()
+    private val pendingEnabled = mutableMapOf<String, Boolean>()
 
     fun installed(): List<WebExtension> = installed.values.sortedWith(
-        compareByDescending<WebExtension> { it.metaData.enabled }.thenBy { displayName(it).lowercase() }
+        compareByDescending<WebExtension> { isEnabled(it) }.thenBy { displayName(it).lowercase() }
     )
 
     fun find(id: String): WebExtension? = installed[id]
@@ -60,11 +61,14 @@ class ExtensionManager(
 
     fun isInstalling(): Boolean = pendingInstalls.isNotEmpty()
 
-    fun enabledCount(): Int = installed.values.count { it.metaData.enabled }
+    fun enabledCount(): Int = installed.values.count(::isEnabled)
+
+    /** The state the user last asked for, until GeckoView confirms it. */
+    fun isEnabled(extension: WebExtension): Boolean = pendingEnabled[extension.id] ?: extension.metaData.enabled
 
     /** Bundled extensions the user has not turned on yet, offered as one-tap adds. */
     fun suggestions(): List<AllowedExtension> = AllowedExtensions.all.filter { allowed ->
-        installed[allowed.id]?.metaData?.enabled != true
+        installed[allowed.id]?.let(::isEnabled) != true
     }
 
     fun start() {
@@ -114,6 +118,7 @@ class ExtensionManager(
 
     fun setEnabled(extension: WebExtension, enabled: Boolean) {
         AllowedExtensions.byId(extension.id)?.let { preferences.setEnabled(it, enabled) }
+        pendingEnabled[extension.id] = enabled
         if (!enabled) actionRegistry.remove(extension.id)
         val controller = runtime.webExtensionController
         // Bundled extensions are switched with the APP source so they never pick up a
@@ -126,7 +131,11 @@ class ExtensionManager(
         val result = if (enabled) controller.enable(extension, source) else controller.disable(extension, source)
         result.accept(
             { updated -> updated?.let(::track); notifyChanged() },
-            { error -> SafeLog.warning("Extension toggle failed: ${extension.id}", error); refresh() }
+            { error ->
+                SafeLog.warning("Extension toggle failed: ${extension.id}", error)
+                pendingEnabled.remove(extension.id)
+                refresh()
+            }
         )
     }
 
@@ -219,6 +228,7 @@ class ExtensionManager(
 
     private fun track(extension: WebExtension) {
         installed[extension.id] = extension
+        if (pendingEnabled[extension.id] == extension.metaData.enabled) pendingEnabled.remove(extension.id)
         actionRegistry.register(extension)
         extension.setTabDelegate(tabDelegate)
         if (!icons.containsKey(extension.id)) {
