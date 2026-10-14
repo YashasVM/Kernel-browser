@@ -1315,90 +1315,175 @@ class MainActivity : Activity() {
     }
 
     private fun showBookmarksSheet() {
-        ChromeSheet.show(
-            context = this,
-            title = "Bookmarks",
-            subtitle = "Saved pages"
-        ) { dialog ->
-            val bookmarks = bookmarksStore.entries()
-            if (bookmarks.isEmpty()) {
-                addView(ChromeSheet.note(this@MainActivity, "Bookmarked pages will appear here."))
-            } else {
-                bookmarks.forEach { (title, url) ->
-                    addView(ChromeSheet.row(
-                        context = this@MainActivity,
-                        title = title,
-                        subtitle = url,
+        ChromeSheet.show(this, title = "Bookmarks") { dialog ->
+            val container = this
+            fun render() {
+                container.removeAllViews()
+                val bookmarks = bookmarksStore.entries()
+                if (bookmarks.isEmpty()) {
+                    container.addView(KernelUi.group(this@MainActivity, KernelUi.item(
+                        this@MainActivity,
+                        title = "No bookmarks yet",
+                        subtitle = "Tap Bookmark in the menu to save the page you're on.",
+                        icon = R.drawable.ic_bookmark_border,
+                        tile = R.color.tile_gray
+                    )))
+                    return
+                }
+                container.addView(KernelUi.group(this@MainActivity, bookmarks.map { (title, url) ->
+                    val label = title.ifBlank { url }
+                    val actions = {
+                        showLinkActions(label, url, onRemove = {
+                            bookmarksStore.remove(url)
+                            render()
+                        }, onDone = { dialog.dismiss() })
+                    }
+                    KernelUi.item(
+                        this@MainActivity,
+                        title = label,
+                        subtitle = readableUrl(url),
+                        leading = KernelUi.letterTile(this@MainActivity, AddressDisplay.format(url, browserPreferences.searchEngine).ifBlank { label }, url),
+                        trailing = KernelUi.moreButton(this@MainActivity, "More for $label", actions),
                         onClick = {
                             dialog.dismiss()
-                            tabs.activeTab?.session?.loadUri(url)
-                            setChromeVisible(true)
+                            openHistoryEntry(url)
                         }
-                    ))
-                }
-                addView(ChromeSheet.actionButton(this@MainActivity, "Clear bookmarks", danger = true) {
-                    bookmarksStore.clear()
-                    dialog.dismiss()
-                    showMessage("Bookmarks cleared")
-                })
+                    ).apply {
+                        setOnLongClickListener { actions(); true }
+                    }
+                }))
+                container.addView(KernelUi.sectionHeader(this@MainActivity, ""))
+                container.addView(KernelUi.group(this@MainActivity, KernelUi.item(
+                    this@MainActivity, "Clear all bookmarks", icon = R.drawable.ic_delete, tile = R.color.tile_red, danger = true
+                ) {
+                    confirmAction("Clear all bookmarks?", "This removes ${bookmarks.size} saved ${if (bookmarks.size == 1) "page" else "pages"}.", "Clear") {
+                        bookmarksStore.clear()
+                        render()
+                    }
+                }))
             }
+            render()
+        }
+    }
+
+    /** Secondary actions for a saved page (bookmark or history row). */
+    private fun showLinkActions(title: String, url: String, onRemove: (() -> Unit)?, onDone: () -> Unit) {
+        ChromeSheet.show(this, title = title, subtitle = readableUrl(url), compactTitle = true) { dialog ->
+            fun run(action: () -> Unit): () -> Unit = {
+                dialog.dismiss()
+                action()
+            }
+            val rows = mutableListOf<View>(
+                KernelUi.item(this@MainActivity, "Open in new tab", icon = R.drawable.ic_add, tile = R.color.tile_blue,
+                    onClick = run { onDone(); openInTab(url, TabMode.NORMAL) }),
+                KernelUi.item(this@MainActivity, "Open in private tab", icon = R.drawable.ic_private, tile = R.color.tile_indigo,
+                    onClick = run { onDone(); openInTab(url, TabMode.PRIVATE) }),
+                KernelUi.item(this@MainActivity, "Copy link", icon = R.drawable.ic_link, tile = R.color.tile_gray,
+                    onClick = run { copyText("Link", url, "Link copied") }),
+                KernelUi.item(this@MainActivity, "Share", icon = R.drawable.ic_share, tile = R.color.tile_green,
+                    onClick = run { shareText(title, url) })
+            )
+            if (onRemove != null) {
+                rows += KernelUi.item(this@MainActivity, "Remove", icon = R.drawable.ic_delete, tile = R.color.tile_red,
+                    danger = true, onClick = run(onRemove))
+            }
+            addView(KernelUi.group(this@MainActivity, rows))
+        }
+    }
+
+    /** A small confirmation sheet for destructive actions. */
+    private fun confirmAction(title: String, message: String, action: String, onConfirm: () -> Unit) {
+        ChromeSheet.show(this, title = title, subtitle = message, scrollable = false, showDone = false, compactTitle = true) { dialog ->
+            addView(ChromeSheet.buttonRow(
+                this@MainActivity,
+                ChromeSheet.actionButton(this@MainActivity, "Cancel") { dialog.dismiss() },
+                ChromeSheet.actionButton(this@MainActivity, action, danger = true) {
+                    dialog.dismiss()
+                    onConfirm()
+                }
+            ))
         }
     }
 
     private fun showDownloadsSheet() {
-        ChromeSheet.show(
-            context = this,
-            title = "Downloads",
-            subtitle = "Recent files sent to Android downloads"
-        ) { dialog ->
-            val downloads = downloadStore.entries()
-            if (downloads.isEmpty()) {
-                addView(ChromeSheet.note(this@MainActivity, "Files you download will appear here after they start."))
-            } else {
-                downloads.forEach { entry ->
-                    addView(ChromeSheet.row(
-                        context = this@MainActivity,
-                        title = entry.title,
-                        subtitle = "${downloadStatus(entry)} - ${entry.url}",
-                        onClick = { showDownloadActions(entry) }
-                    ))
+        ChromeSheet.show(this, title = "Downloads") { dialog ->
+            val container = this
+            fun render() {
+                container.removeAllViews()
+                val downloads = downloadStore.entries()
+                if (downloads.isEmpty()) {
+                    container.addView(KernelUi.group(this@MainActivity, KernelUi.item(
+                        this@MainActivity,
+                        title = "No downloads yet",
+                        subtitle = "Files you download will show up here.",
+                        icon = R.drawable.ic_download,
+                        tile = R.color.tile_gray
+                    )))
+                } else {
+                    container.addView(KernelUi.group(this@MainActivity, downloads.map { entry ->
+                        val status = downloadStatus(entry)
+                        val tile = when {
+                            status.startsWith("Failed") || status == "Missing" -> R.color.tile_red
+                            status == "Downloaded" || status == "Recorded" -> R.color.tile_green
+                            else -> R.color.tile_orange
+                        }
+                        val actions = { showDownloadActions(entry) { render() } }
+                        KernelUi.item(
+                            this@MainActivity,
+                            title = entry.title,
+                            subtitle = listOf(status, shortHost(entry.url)).filter { it.isNotBlank() }.joinToString(" · "),
+                            icon = R.drawable.ic_download,
+                            tile = tile,
+                            trailing = KernelUi.moreButton(this@MainActivity, "More for ${entry.title}", actions),
+                            onClick = { openDownload(entry) }
+                        ).apply {
+                            setOnLongClickListener { actions(); true }
+                        }
+                    }))
                 }
+                container.addView(KernelUi.sectionHeader(this@MainActivity, ""))
+                val rows = mutableListOf<View>(
+                    KernelUi.item(this@MainActivity, "Open Downloads folder", icon = R.drawable.ic_folder, tile = R.color.tile_blue,
+                        chevron = true, onClick = ::openSystemDownloads)
+                )
+                if (downloads.isNotEmpty()) {
+                    rows += KernelUi.item(this@MainActivity, "Clear list", subtitle = "Files stay on your device.",
+                        icon = R.drawable.ic_delete, tile = R.color.tile_red, danger = true) {
+                        confirmAction("Clear download list?", "Downloaded files stay on your device.", "Clear") {
+                            downloadStore.clear()
+                            render()
+                        }
+                    }
+                }
+                container.addView(KernelUi.group(this@MainActivity, rows))
             }
-            addView(actionRow(
-                ChromeSheet.actionButton(this@MainActivity, "Open Downloads") {
-                    openSystemDownloads()
-                },
-                ChromeSheet.actionButton(this@MainActivity, "Clear", danger = true) {
-                    downloadStore.clear()
-                    dialog.dismiss()
-                    showMessage("Download history cleared")
-                }
-            ))
+            render()
         }
     }
 
-    private fun showDownloadActions(entry: DownloadStore.Entry) {
-        ChromeSheet.show(
-            context = this,
-            title = entry.title,
-            subtitle = downloadStatus(entry),
-            scrollable = false
-        ) { dialog ->
-            addView(actionRow(
-                ChromeSheet.actionButton(this@MainActivity, "Open", primary = true) {
-                    dialog.dismiss()
-                    openDownload(entry)
-                },
-                ChromeSheet.actionButton(this@MainActivity, "Remove", danger = true) {
-                    dialog.dismiss()
-                    removeDownload(entry)
-                }
+    private fun shortHost(url: String): String =
+        runCatching { Uri.parse(url).host }.getOrNull()?.removePrefix("www.").orEmpty()
+
+    private fun showDownloadActions(entry: DownloadStore.Entry, onChanged: () -> Unit) {
+        ChromeSheet.show(this, title = entry.title, subtitle = downloadStatus(entry), compactTitle = true) { dialog ->
+            fun run(action: () -> Unit): () -> Unit = {
+                dialog.dismiss()
+                action()
+            }
+            addView(KernelUi.group(
+                this@MainActivity,
+                KernelUi.item(this@MainActivity, "Open", icon = R.drawable.ic_download, tile = R.color.tile_green,
+                    onClick = run { openDownload(entry) }),
+                KernelUi.item(this@MainActivity, "Copy download link", icon = R.drawable.ic_link, tile = R.color.tile_gray,
+                    onClick = run { copyText("Download source", entry.url, "Link copied") }),
+                KernelUi.item(this@MainActivity, "Delete file", icon = R.drawable.ic_delete, tile = R.color.tile_red, danger = true,
+                    onClick = run {
+                        confirmAction("Delete ${entry.title}?", "The file will be removed from your device.", "Delete") {
+                            removeDownload(entry)
+                            onChanged()
+                        }
+                    })
             ))
-            addView(ChromeSheet.actionButton(this@MainActivity, "Copy source") {
-                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                clipboard.setPrimaryClip(ClipData.newPlainText("Download source", entry.url))
-                showMessage("Source copied")
-            })
         }
     }
 
@@ -1427,7 +1512,6 @@ class MainActivity : Activity() {
             runCatching { downloadManager.remove(entry.id) }
         }
         downloadStore.remove(entry.id)
-        showMessage("Download removed")
     }
 
     private fun downloadStatus(entry: DownloadStore.Entry): String {
@@ -1532,23 +1616,37 @@ class MainActivity : Activity() {
 
     private fun showSiteInfo() {
         val tab = tabs.activeTab
-        ChromeSheet.show(
-            context = this,
-            title = "Site info",
-            subtitle = tab?.securityHost?.ifBlank { tab.url }.orEmpty()
-        ) {
-            addView(ChromeSheet.row(
-                context = this@MainActivity,
-                title = if (tab?.isSecure == true) "Connection secure" else "Connection not verified",
-                subtitle = tab?.url.orEmpty(),
-                trailing = ChromeSheet.statusPill(this@MainActivity, if (tab?.isSecure == true) "HTTPS" else "Info", tab?.isSecure == true)
-            ))
-            addView(ChromeSheet.row(
-                context = this@MainActivity,
-                title = "Clear site data",
-                subtitle = "Clear cookies, cache, permissions, and storage for this site.",
-                onClick = { clearCurrentSiteData() }
-            ))
+        val host = currentHost()
+        val secure = tab?.isSecure == true
+        ChromeSheet.show(this, title = host?.removePrefix("www.") ?: "Site info", subtitle = tab?.url?.let(::readableUrl),
+            compactTitle = true) { dialog ->
+            addView(KernelUi.group(this@MainActivity, KernelUi.item(
+                this@MainActivity,
+                title = if (secure) "Connection is secure" else "Connection is not secure",
+                subtitle = if (secure) {
+                    "Information you send to this site is encrypted."
+                } else {
+                    "Don't enter passwords or payment details on this site."
+                },
+                icon = if (secure) R.drawable.ic_lock else R.drawable.ic_info,
+                tile = if (secure) R.color.tile_green else R.color.tile_red
+            )))
+            if (host != null) {
+                addView(KernelUi.sectionHeader(this@MainActivity, ""))
+                addView(KernelUi.group(this@MainActivity, KernelUi.item(
+                    this@MainActivity,
+                    title = "Clear cookies and site data",
+                    subtitle = "You'll be signed out of $host.",
+                    icon = R.drawable.ic_cookie,
+                    tile = R.color.tile_red,
+                    danger = true
+                ) {
+                    confirmAction("Clear data for $host?", "Cookies, storage, cache, and permissions for this site are removed.", "Clear") {
+                        dialog.dismiss()
+                        clearCurrentSiteData()
+                    }
+                }))
+            }
         }
     }
 
@@ -1967,19 +2065,6 @@ class MainActivity : Activity() {
                 state = if (tab.url.isBlank() || tab.sessionStateUrl != tab.url) "" else tab.sessionState
             )
         })
-    }
-
-    private fun actionRow(left: View, right: View): LinearLayout {
-        return LinearLayout(this).apply {
-            gravity = Gravity.CENTER
-            orientation = LinearLayout.HORIZONTAL
-            addView(left, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                marginEnd = ChromeSheet.dp(this@MainActivity, 6)
-            })
-            addView(right, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                marginStart = ChromeSheet.dp(this@MainActivity, 6)
-            })
-        }
     }
 
     private fun recordHistory(tab: BrowserTab) {

@@ -95,16 +95,6 @@ object ChromeSheet {
         return dialog
     }
 
-    fun sectionLabel(context: Context, text: String): TextView {
-        return TextView(context).apply {
-            this.text = text.uppercase()
-            textSize = 12f
-            setTextColor(context.getColor(R.color.kernel_muted))
-            letterSpacing = 0.08f
-            setPadding(dp(context, 2), dp(context, 18), dp(context, 2), dp(context, 8))
-        }
-    }
-
     fun note(context: Context, text: String): TextView {
         return TextView(context).apply {
             this.text = text
@@ -131,68 +121,6 @@ object ChromeSheet {
             setTextColor(context.getColor(R.color.kernel_text))
             setTextIsSelectable(true)
             setPadding(dp(context, 2), 0, dp(context, 2), dp(context, 14))
-        }
-    }
-
-    fun statusPill(context: Context, text: String, accent: Boolean = false): TextView {
-        return TextView(context).apply {
-            this.text = text
-            gravity = Gravity.CENTER
-            minHeight = dp(context, 32)
-            textSize = 12f
-            typeface = android.graphics.Typeface.DEFAULT_BOLD
-            setTextColor(context.getColor(if (accent) R.color.kernel_accent else R.color.kernel_muted))
-            setPadding(dp(context, 10), 0, dp(context, 10), 0)
-        }
-    }
-
-    fun row(
-        context: Context,
-        title: String,
-        subtitle: String? = null,
-        trailing: View? = null,
-        onClick: (() -> Unit)? = null
-    ): LinearLayout {
-        return LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            minimumHeight = dp(context, 64)
-            setPadding(dp(context, 16), dp(context, 13), dp(context, 12), dp(context, 13))
-            setBackgroundResource(R.drawable.sheet_row_background)
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply {
-                bottomMargin = dp(context, 8)
-            }
-            if (onClick != null) {
-                isClickable = true
-                isFocusable = true
-                setOnClickListener { onClick() }
-            }
-
-            addView(LinearLayout(context).apply {
-                orientation = LinearLayout.VERTICAL
-                addView(TextView(context).apply {
-                    text = title
-                    textSize = 16f
-                    setTextColor(context.getColor(R.color.kernel_text))
-                    typeface = android.graphics.Typeface.DEFAULT_BOLD
-                })
-                if (!subtitle.isNullOrBlank()) {
-                    addView(TextView(context).apply {
-                        text = subtitle
-                        textSize = 13f
-                        setLineSpacing(dp(context, 1).toFloat(), 1f)
-                        setTextColor(context.getColor(R.color.kernel_muted))
-                        setPadding(0, dp(context, 3), dp(context, 8), 0)
-                    })
-                }
-            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-
-            trailing?.let {
-                addView(it)
-            }
         }
     }
 
