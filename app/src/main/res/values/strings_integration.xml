@@ -1,0 +1,4 @@
+<resources>
+    <!-- Shown in other apps' text selection menus (ACTION_PROCESS_TEXT). -->
+    <string name="process_text_search">Search with Kernel</string>
+</resources>

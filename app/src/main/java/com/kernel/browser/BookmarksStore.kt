@@ -20,6 +20,12 @@ class BookmarksStore(context: Context) {
         save(BrowserHistoryCodec.record(entries(), entryTitle, url))
     }
 
+    /** Changes a bookmark's title in place, keeping its position. */
+    fun rename(url: String, title: String) {
+        val newTitle = title.trim().ifBlank { url }
+        save(entries().map { if (it.second == url) newTitle to url else it })
+    }
+
     fun remove(url: String) {
         save(entries().filterNot { it.second == url })
     }
