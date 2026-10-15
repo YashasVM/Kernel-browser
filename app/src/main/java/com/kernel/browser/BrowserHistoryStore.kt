@@ -6,6 +6,8 @@ class BrowserHistoryStore(context: Context) {
     private val preferences = context.getSharedPreferences("browser_history", Context.MODE_PRIVATE)
     private var cache: List<BrowserHistoryCodec.Entry>? = null
     private var pairs: List<Pair<String, String>>? = null
+    // Pages report each visit several times (location, title, load); write off the UI thread.
+    private val writer = LatestPreferenceWrite(preferences, KEY_ENTRIES)
 
     /** Newest first, as (title, url). */
     fun entries(): List<Pair<String, String>> {
@@ -34,13 +36,14 @@ class BrowserHistoryStore(context: Context) {
     fun clear() {
         cache = emptyList()
         pairs = emptyList()
-        preferences.edit().remove(KEY_ENTRIES).apply()
+        writer.remove()
     }
 
     private fun save(entries: List<BrowserHistoryCodec.Entry>) {
         cache = entries
         pairs = null
-        preferences.edit().putString(KEY_ENTRIES, BrowserHistoryCodec.encodeEntries(entries)).apply()
+        // [entries] is a fresh list nobody mutates, so encoding it on the writer thread is safe.
+        writer.put { BrowserHistoryCodec.encodeEntries(entries) }
     }
 
     private companion object {

@@ -71,7 +71,7 @@ class SettingsDialogController(
     private class PageEntry(val page: Page, val view: View, val scroll: ScrollView, val content: LinearLayout)
 
     fun show() {
-        dialog = Dialog(context, android.R.style.Theme_Material_NoActionBar)
+        dialog = Dialog(context, R.style.KernelFullScreenDialog)
         host = FrameLayout(context).apply {
             setBackgroundColor(context.getColor(R.color.kernel_background))
             fitsSystemWindows = true

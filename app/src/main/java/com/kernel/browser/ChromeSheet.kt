@@ -134,7 +134,7 @@ object ChromeSheet {
         return TextView(context).apply {
             this.text = text
             gravity = Gravity.CENTER
-            minHeight = dp(context, 46)
+            minHeight = dp(context, 48)
             textSize = 15f
             setTextColor(
                 when {
@@ -194,8 +194,10 @@ object ChromeSheet {
             if (showDone) addView(TextView(context).apply {
                 text = "Done"
                 gravity = Gravity.CENTER
-                minWidth = dp(context, 58)
-                minHeight = dp(context, 44)
+                minWidth = dp(context, 64)
+                minHeight = dp(context, 48)
+                setPadding(dp(context, 12), 0, dp(context, 12), 0)
+                background = context.getDrawable(R.drawable.toolbar_button_background)
                 setTextColor(context.getColor(R.color.kernel_accent))
                 textSize = 16f
                 isClickable = true
@@ -213,8 +215,8 @@ object ChromeSheet {
             setSingleLine(true)
             textSize = 16f
             setTextColor(context.getColor(R.color.kernel_text))
-            setHintTextColor(context.getColor(R.color.kernel_disabled))
-            setBackgroundResource(R.drawable.sheet_row_background)
+            setHintTextColor(context.getColor(R.color.kernel_muted))
+            setBackgroundResource(R.drawable.sheet_field_background)
             setPadding(dp(context, 16), 0, dp(context, 16), 0)
             if (password) {
                 inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD

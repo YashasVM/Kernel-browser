@@ -1,25 +1,44 @@
 <resources>
-    <color name="kernel_background">#202124</color>
-    <color name="kernel_surface">#2A2B2F</color>
-    <color name="kernel_surface_alt">#34363A</color>
-    <color name="kernel_surface_elevated">#242529</color>
-    <color name="kernel_chrome">#FF25262A</color>
-    <color name="kernel_address_surface">#FF34363B</color>
-    <color name="kernel_text">#F2F3F5</color>
-    <color name="kernel_muted">#C0C3CA</color>
-    <color name="kernel_border">#4A4D54</color>
-    <color name="kernel_accent">#7AB7FF</color>
-    <color name="kernel_tab_accent">#FF725C</color>
+    <!--
+        Light palette (default). The dark palette lives in values-night/colors.xml and
+        overrides every theme-dependent color below; tile colors and the launcher
+        background are shared by both themes.
+        Text contrast (WCAG): kernel_text 14.8:1, kernel_muted 5.4:1, kernel_accent 5.7:1,
+        kernel_danger 5.9:1 and kernel_private_accent 4.8:1 on their usual surfaces.
+    -->
+    <color name="kernel_background">#F1F3F4</color>
+    <color name="kernel_surface">#FFFFFF</color>
+    <color name="kernel_surface_alt">#E8EAED</color>
+    <color name="kernel_surface_elevated">#E8EAED</color>
+    <color name="kernel_chrome">#FFFFFFFF</color>
+    <color name="kernel_address_surface">#FFF1F3F4</color>
+    <color name="kernel_text">#1F1F1F</color>
+    <color name="kernel_muted">#5F6368</color>
+    <color name="kernel_border">#DADCE0</color>
+    <color name="kernel_accent">#0B57D0</color>
+    <color name="kernel_tab_accent">#D93025</color>
+    <color name="kernel_danger">#B3261E</color>
+    <color name="kernel_disabled">#80868B</color>
+    <color name="kernel_scrim">#66000000</color>
+    <color name="kernel_on_accent">#FFFFFF</color>
+    <color name="kernel_private_surface">#FFECE6FB</color>
+    <color name="kernel_private_border">#FF8E6FE0</color>
+    <color name="kernel_private_accent">#6B46E0</color>
+    <color name="kernel_on_private_accent">#FFFFFF</color>
+    <color name="kernel_snackbar">#303134</color>
+    <color name="kernel_snackbar_text">#F1F3F4</color>
+    <color name="kernel_snackbar_action">#A8C7FA</color>
+    <color name="kernel_divider">#E1E3E6</color>
+    <color name="kernel_group">#FFFFFF</color>
+    <color name="kernel_segment_track">#E3E5E8</color>
+    <color name="kernel_segment_thumb">#FFFFFF</color>
+    <color name="kernel_button_disabled">#E3E5E8</color>
+    <color name="kernel_sheet_handle">#BDC1C6</color>
+    <color name="kernel_ripple">#1F000000</color>
+
+    <!-- Shared by both themes. -->
     <color name="kernel_logo_background">#050506</color>
-    <color name="kernel_danger">#FF6B7A</color>
-    <color name="kernel_disabled">#70747C</color>
-    <color name="kernel_scrim">#99000000</color>
-    <color name="kernel_on_accent">#0B1B33</color>
-    <color name="kernel_private_surface">#FF3A3156</color>
-    <color name="kernel_private_border">#FF6B5BB5</color>
-    <color name="kernel_snackbar">#3A3C42</color>
-    <color name="kernel_divider">#3F4247</color>
-    <color name="kernel_group">#2C2D31</color>
+    <color name="kernel_on_tile">#FFFFFF</color>
     <color name="tile_blue">#3B82F6</color>
     <color name="tile_green">#22A55A</color>
     <color name="tile_orange">#F08A24</color>
