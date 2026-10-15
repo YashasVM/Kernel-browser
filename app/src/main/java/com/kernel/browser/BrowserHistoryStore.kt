@@ -5,6 +5,8 @@ import android.content.Context
 class BrowserHistoryStore(context: Context) {
     private val preferences = context.getSharedPreferences("browser_history", Context.MODE_PRIVATE)
     private var cache: List<Pair<String, String>>? = null
+    // Pages report each visit several times (location, title, load); write off the UI thread.
+    private val writer = LatestPreferenceWrite(preferences, KEY_ENTRIES)
 
     fun entries(): List<Pair<String, String>> {
         return cache ?: BrowserHistoryCodec.decode(preferences.getString(KEY_ENTRIES, "[]")).also { cache = it }
@@ -19,12 +21,12 @@ class BrowserHistoryStore(context: Context) {
 
     fun clear() {
         cache = emptyList()
-        preferences.edit().remove(KEY_ENTRIES).apply()
+        writer.remove()
     }
 
     private fun save(entries: List<Pair<String, String>>) {
         cache = entries
-        preferences.edit().putString(KEY_ENTRIES, BrowserHistoryCodec.encode(entries)).apply()
+        writer.put { BrowserHistoryCodec.encode(entries) }
     }
 
     private companion object {
