@@ -1,37 +1,33 @@
 <resources>
-    <style name="AppTheme" parent="@android:style/Theme.Material.NoActionBar">
+    <!-- Light framework base; values-night/styles.xml swaps in the dark one. -->
+    <style name="Base.AppTheme" parent="@android:style/Theme.Material.Light.NoActionBar" />
+
+    <style name="AppTheme" parent="Base.AppTheme">
         <item name="android:fontFamily">sans</item>
         <item name="android:windowBackground">@color/kernel_background</item>
         <item name="android:colorAccent">@color/kernel_accent</item>
+        <item name="android:colorControlHighlight">@color/kernel_ripple</item>
         <item name="android:navigationBarColor">@color/kernel_background</item>
         <item name="android:statusBarColor">@color/kernel_background</item>
-        <item name="android:windowLightStatusBar">false</item>
-        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:windowLightStatusBar">@bool/kernel_light_system_bars</item>
+        <item name="android:windowLightNavigationBar">@bool/kernel_light_system_bars</item>
         <item name="android:windowDrawsSystemBarBackgrounds">true</item>
         <item name="android:windowTranslucentStatus">false</item>
         <item name="android:windowTranslucentNavigation">false</item>
     </style>
 
-    <style name="BrowserNavButton">
-        <item name="android:layout_width">0dp</item>
-        <item name="android:layout_height">match_parent</item>
-        <item name="android:layout_weight">1</item>
-        <item name="android:background">@drawable/toolbar_button_background</item>
-        <item name="android:clickable">true</item>
-        <item name="android:focusable">true</item>
-        <item name="android:gravity">center</item>
-        <item name="android:drawablePadding">2dp</item>
-        <item name="android:drawableTint">@color/nav_button_icon</item>
-        <item name="android:includeFontPadding">false</item>
-        <item name="android:minWidth">48dp</item>
-        <item name="android:minHeight">56dp</item>
-        <item name="android:paddingStart">2dp</item>
-        <item name="android:paddingEnd">2dp</item>
-        <item name="android:textColor">@color/nav_button_text</item>
-        <item name="android:textSize">10sp</item>
-        <item name="android:textStyle">bold</item>
+    <!-- Full-screen dialogs (tab switcher, settings) that follow the light/dark palette. -->
+    <style name="KernelFullScreenDialog" parent="AppTheme">
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowIsFloating">false</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:backgroundDimEnabled">false</item>
     </style>
 
+    <!--
+        Bottom toolbar button: an ImageButton whose 24dp icon is centered by scaleType,
+        so it stays centered at any button size without padding arithmetic.
+    -->
     <style name="BrowserIconButton">
         <item name="android:layout_width">0dp</item>
         <item name="android:layout_height">48dp</item>
@@ -39,32 +35,22 @@
         <item name="android:background">@drawable/toolbar_button_background</item>
         <item name="android:clickable">true</item>
         <item name="android:focusable">true</item>
-        <item name="android:gravity">center</item>
-        <item name="android:drawableTint">@color/nav_button_icon</item>
-        <item name="android:includeFontPadding">false</item>
         <item name="android:minWidth">48dp</item>
         <item name="android:minHeight">48dp</item>
-        <!-- drawableTop sits at the top padding, so (48dp - 24dp icon) / 2 centers it. -->
-        <item name="android:paddingTop">12dp</item>
-        <item name="android:paddingBottom">0dp</item>
-        <item name="android:textColor">@color/kernel_text</item>
-        <item name="android:textSize">0sp</item>
+        <item name="android:padding">0dp</item>
+        <item name="android:scaleType">center</item>
+        <item name="android:tint">@color/nav_button_icon</item>
     </style>
 
+    <!-- 48dp round button inside the 48dp address pill / find bar, with a 22dp icon. -->
     <style name="AddressActionButton">
-        <item name="android:layout_width">44dp</item>
-        <item name="android:layout_height">44dp</item>
-        <item name="android:background">@drawable/toolbar_button_background</item>
+        <item name="android:layout_width">48dp</item>
+        <item name="android:layout_height">48dp</item>
+        <item name="android:background">@drawable/circle_button_background</item>
         <item name="android:clickable">true</item>
         <item name="android:focusable">true</item>
-        <item name="android:gravity">center</item>
-        <item name="android:drawableTint">@color/nav_button_icon</item>
-        <item name="android:includeFontPadding">false</item>
-        <item name="android:minWidth">44dp</item>
-        <item name="android:minHeight">44dp</item>
-        <item name="android:paddingTop">10dp</item>
-        <item name="android:paddingBottom">0dp</item>
-        <item name="android:textColor">@color/kernel_text</item>
-        <item name="android:textSize">0sp</item>
+        <item name="android:padding">13dp</item>
+        <item name="android:scaleType">fitCenter</item>
+        <item name="android:tint">@color/nav_button_icon</item>
     </style>
 </resources>

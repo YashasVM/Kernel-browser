@@ -1,3 +1,4 @@
 <resources>
     <item name="kernel_row_has_icon" type="id" />
+    <item name="kernel_night_mode" type="id" />
 </resources>

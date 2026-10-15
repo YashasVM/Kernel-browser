@@ -42,6 +42,7 @@ import com.kernel.browser.extensions.ExtensionManager
 import com.kernel.browser.extensions.ExtensionPreferences
 import com.kernel.browser.tabs.BrowserTab
 import com.kernel.browser.tabs.BrowserTabs
+import com.kernel.browser.tabs.TabMemoryPolicy
 import com.kernel.browser.tabs.TabMode
 import org.mozilla.geckoview.AllowOrDeny
 import org.mozilla.geckoview.Autocomplete
@@ -65,6 +66,7 @@ class MainActivity : Activity() {
     private lateinit var binding: ActivityMainBinding
     private lateinit var runtime: GeckoRuntime
     private lateinit var tabs: BrowserTabs
+    private lateinit var tabResources: TabResourceManager
     private lateinit var extensionPreferences: ExtensionPreferences
     private lateinit var extensionManager: ExtensionManager
     private lateinit var extensionActionRegistry: ExtensionActionRegistry
@@ -173,6 +175,13 @@ class MainActivity : Activity() {
         extensionManager.start()
 
         tabs = BrowserTabs(runtime, ::configureSession)
+        tabResources = TabResourceManager(
+            tabs = tabs,
+            runtime = runtime,
+            isPlayingMedia = { it.session in playingSessions },
+            mustStayLoaded = { it.session == fullScreenSession || it.session == extensionActiveSession },
+            loadHome = ::openHome
+        )
         restoreTabsOrCreateHome(intent)
 
         configureToolbar()
@@ -183,6 +192,14 @@ class MainActivity : Activity() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
+        if (KernelTheme.consumeNightModeChange(window, newConfig)) {
+            // Light/dark switch: the activity handles uiMode itself so tabs and private
+            // sessions survive; re-tint the views that were inflated with the old palette.
+            configureSystemBars()
+            KernelTheme.refreshChrome(binding)
+            binding.addressPill.tag = null
+            updateUi()
+        }
         // The activity handles rotation itself, so the floating toolbar must be resized here;
         // otherwise it keeps the width it had in the previous orientation.
         binding.root.post { applyChromeWidth() }
@@ -229,6 +246,36 @@ class MainActivity : Activity() {
         chromeHandler.removeCallbacks(saveSessionRunnable)
         saveNormalSession()
         super.onPause()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        tabResources.onAppVisibilityChanged(visible = true)
+    }
+
+    override fun onStop() {
+        // Hidden pages stop running (unless playing media) so they don't drain the battery.
+        tabResources.onAppVisibilityChanged(visible = false)
+        super.onStop()
+    }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        trimTabMemory(level)
+    }
+
+    override fun onLowMemory() {
+        super.onLowMemory()
+        trimTabMemory(TabMemoryPolicy.TRIM_MEMORY_COMPLETE)
+    }
+
+    /** Unloads background tabs and drops their thumbnails when Android is short on memory. */
+    private fun trimTabMemory(level: Int) {
+        tabResources.onTrimMemory(level)
+        if (TabMemoryPolicy.shouldDropThumbnails(level)) {
+            // Dropped, not recycled: an open tab switcher may still be drawing them.
+            tabThumbnails.keys.retainAll(setOfNotNull(tabs.activeTab?.id))
+        }
     }
 
     override fun onDestroy() {
@@ -306,29 +353,16 @@ class MainActivity : Activity() {
         val restoredTabs = sessionStore.restore().ifEmpty {
             listOf(SessionStore.Entry("Home", StartPage.SESSION_URL, ""))
         }
-        restoredTabs.forEachIndexed { index, entry ->
-            val tab = tabs.create(TabMode.NORMAL)
+        // Only the selected (last) tab loads now; the others wait, unopened, until first shown.
+        restoredTabs.forEach { entry ->
+            val tab = tabs.create(TabMode.NORMAL, open = false)
             tab.title = entry.title
             tab.url = entry.url.takeUnless { it == StartPage.SESSION_URL }.orEmpty()
-            if (index == restoredTabs.lastIndex) {
-                attachTab(tab)
-            }
-            if (entry.state.isNotBlank()) {
-                runCatching {
-                    tab.sessionState = entry.state
-                    tab.sessionStateUrl = tab.url
-                    val state = GeckoSession.SessionState.fromString(entry.state)
-                        ?: error("Invalid session state")
-                    tab.session.restoreState(state)
-                }.getOrElse {
-                    tab.session.loadUri(entry.url.ifBlank { browserPreferences.homepageUrl })
-                }
-            } else if (entry.url == StartPage.SESSION_URL) {
-                openHome(tab)
-            } else {
-                tab.session.loadUri(entry.url.ifBlank { browserPreferences.homepageUrl })
-            }
+            tab.sessionState = entry.state
+            tab.sessionStateUrl = tab.url
+            tab.pendingRestore = BrowserTab.PendingRestore(tab.url, entry.state)
         }
+        tabs.activeTab?.let(::attachTab)
     }
 
     private fun openIntentUri(intent: Intent?): Boolean {
@@ -473,7 +507,7 @@ class MainActivity : Activity() {
         }
         window.statusBarColor = getColor(R.color.kernel_background)
         window.navigationBarColor = getColor(R.color.kernel_background)
-        window.decorView.systemUiVisibility = 0
+        KernelTheme.applySystemBarAppearance(window)
     }
 
     private fun configureInsets() {
@@ -846,7 +880,7 @@ class MainActivity : Activity() {
         tab.session.progressDelegate = object : GeckoSession.ProgressDelegate {
             override fun onPageStart(session: GeckoSession, url: String) {
                 if (session != tab.session) return
-                if (tab == tabs.activeTab) markExtensionActiveTab(session)
+                if (tab == tabs.activeTab) markExtensionActiveTab(session) else tabResources.sendToBackground(tab)
                 tab.isLoading = true
                 if (!isInitialBlank(tab, url)) tab.url = StartPage.displayUrl(url)
                 setChromeVisible(true)
@@ -1164,7 +1198,7 @@ class MainActivity : Activity() {
             cornerRadius = ChromeSheet.dp(this@MainActivity, 16).toFloat()
         }.let { shape ->
             android.graphics.drawable.RippleDrawable(
-                ColorStateList.valueOf(0x33FFFFFF), shape, shape
+                ColorStateList.valueOf(getColor(R.color.kernel_ripple)), shape, shape
             )
         }
     }
@@ -1260,6 +1294,9 @@ class MainActivity : Activity() {
                 addView(quickAction(R.drawable.ic_add, "New tab", run { openNewTab(TabMode.NORMAL) }))
             }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
                 bottomMargin = ChromeSheet.dp(this@MainActivity, 4)
+                // Each tile has 4dp side margins; pull the row out so its edges line up with the groups below.
+                marginStart = -ChromeSheet.dp(this@MainActivity, 4)
+                marginEnd = -ChromeSheet.dp(this@MainActivity, 4)
             })
 
             addView(KernelUi.sectionHeader(this@MainActivity, "This page"))
@@ -1315,6 +1352,7 @@ class MainActivity : Activity() {
                 cornerRadius = ChromeSheet.dp(this@MainActivity, 16).toFloat()
             }
             foreground = selectableItemBackground()
+            clipToOutline = true
             isClickable = true
             isFocusable = true
             contentDescription = label
@@ -1627,8 +1665,10 @@ class MainActivity : Activity() {
             sessionStore.clear()
         }
         val active = tabs.activeTab ?: tabs.create(TabMode.NORMAL)
+        // An unloaded tab loads itself (start page included) when attached.
+        val needsHome = !active.isUnloaded && active.url.isBlank() && active.sessionState.isBlank()
         attachTab(active)
-        if (active.url.isBlank() && active.sessionState.isBlank()) {
+        if (needsHome) {
             openHome(active)
         }
         saveNormalSession()
@@ -1949,6 +1989,7 @@ class MainActivity : Activity() {
     private fun updateKeepScreenOn() {
         playingSessions.retainAll { it.isOpen }
         mediaPlayback.pruneClosedSessions()
+        tabResources.onMediaStateChanged()
         val activeSession = tabs.activeTab?.session
         if (activeSession != null && activeSession in playingSessions) {
             window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -2008,7 +2049,7 @@ class MainActivity : Activity() {
             window.decorView.systemUiVisibility = if (enabled) {
                 View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
             } else {
-                0
+                KernelTheme.lightSystemBarFlags(this)
             }
         }
     }
@@ -2018,6 +2059,11 @@ class MainActivity : Activity() {
         updateKeepScreenOn()
         if (fullScreenSession == tab.session) onFullScreenChanged(tab.session, false)
         if (extensionActiveSession == tab.session) extensionActiveSession = null
+        // A background tab comes back from its saved state the next time it is shown.
+        if (tab != tabs.activeTab) {
+            tabResources.unload(tab)
+            return
+        }
         if (!tab.session.isOpen) tab.session.open(runtime)
         if (tab == tabs.activeTab) {
             markExtensionActiveTab(tab.session)
@@ -2124,13 +2170,15 @@ class MainActivity : Activity() {
 
     private fun saveNormalSession() {
         sessionStore.save(tabs.all().filterNot { it.isPrivate }.map { tab ->
+            // Tabs not loaded yet (lazy restore) or unloaded keep what they will reload.
+            val pending = tab.pendingRestore
             // A blank url means the start page (or a fresh tab): store a marker, not the data: URI state.
             SessionStore.Entry(
                 title = tab.title,
-                url = tab.url.ifBlank { StartPage.SESSION_URL },
+                url = (pending?.url ?: tab.url).ifBlank { StartPage.SESSION_URL },
                 // State captured for an earlier page (e.g. a background tab's initial about:blank)
                 // would restore the wrong page; fall back to loading the URL.
-                state = if (tab.url.isBlank() || tab.sessionStateUrl != tab.url) "" else tab.sessionState
+                state = pending?.state ?: tab.restorableState()
             )
         })
     }
@@ -2203,8 +2251,10 @@ class MainActivity : Activity() {
 
     private fun attachCurrentOrCreate() {
         val active = tabs.activeTab ?: tabs.create(TabMode.NORMAL)
+        // An unloaded tab loads itself (start page included) when attached.
+        val needsHome = !active.isUnloaded && active.url.isBlank() && active.sessionState.isBlank()
         attachTab(active)
-        if (active.url.isBlank() && active.sessionState.isBlank()) {
+        if (needsHome) {
             openHome(active)
         }
     }
@@ -2238,6 +2288,7 @@ class MainActivity : Activity() {
             onFullScreenChanged(it, false)
         }
         tabs.select(tab.id)
+        tabResources.ensureLoaded(tab)
         markExtensionActiveTab(tab.session)
         binding.geckoView.setSession(tab.session)
         if (binding.addressBar.hasFocus()) {
@@ -2248,6 +2299,7 @@ class MainActivity : Activity() {
         refreshAddressText()
         updatePrivateWindowProtection(tab)
         updateKeepScreenOn()
+        tabResources.onTabAttached()
         updateUi()
     }
 
@@ -2278,10 +2330,13 @@ class MainActivity : Activity() {
         }
         binding.geckoView.capturePixels().accept({ bitmap ->
             if (bitmap != null) {
-                val targetSize = ChromeSheet.dp(this, 240).coerceAtLeast(1)
-                val scaled = Bitmap.createScaledBitmap(bitmap, targetSize, targetSize, true)
-                tabThumbnails[tab.id] = scaled
-                if (bitmap !== scaled) bitmap.recycle()
+                val maxWidth = ChromeSheet.dp(this, TabResourceManager.THUMBNAIL_WIDTH_DP)
+                runCatching { TabResourceManager.compactThumbnail(bitmap, maxWidth) }
+                    .onFailure { SafeLog.warning("Thumbnail failed", it) }
+                    .getOrNull()
+                    ?.let { tabThumbnails[tab.id] = it }
+                // The thumbnail is a separate copy, so the full-size capture can go now.
+                bitmap.recycle()
             }
             onDone?.invoke()
         }, {
@@ -2297,17 +2352,10 @@ class MainActivity : Activity() {
         val loading = tab?.isLoading == true
         val editing = binding.addressBar.hasFocus()
         val showClear = editing && binding.addressBar.text.isNotEmpty()
-        binding.reloadButton.text = ""
         binding.reloadButton.visibility = if (editing && !showClear) View.GONE else View.VISIBLE
-        binding.reloadButton.setCompoundDrawablesWithIntrinsicBounds(
-            0,
-            if (loading || showClear) R.drawable.ic_close else R.drawable.ic_refresh,
-            0,
-            0
-        )
+        binding.reloadButton.setImageResource(if (loading || showClear) R.drawable.ic_close else R.drawable.ic_refresh)
         val count = tabs.count()
         binding.tabsCount.text = if (count > 99) "∞" else count.toString()
-        binding.extensionsButton.text = ""
         binding.backButton.contentDescription = getString(R.string.action_back)
         binding.forwardButton.contentDescription = getString(R.string.action_forward)
         binding.reloadButton.contentDescription = when {
