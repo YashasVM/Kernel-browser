@@ -1,8 +1,5 @@
 package com.kernel.browser
 
-import java.net.URLEncoder
-import java.nio.charset.StandardCharsets
-
 object UrlNormalizer {
     private val schemePattern = Regex("^[a-zA-Z][a-zA-Z0-9+.-]*:")
     private val hostLikePattern = Regex(
@@ -24,7 +21,6 @@ object UrlNormalizer {
             return trimmed
         }
 
-        val encoded = URLEncoder.encode(trimmed, StandardCharsets.UTF_8.name())
-        return searchEngine.searchUrl.format(encoded)
+        return searchEngine.searchUrlFor(trimmed)
     }
 }

@@ -211,6 +211,7 @@ class MainActivity : Activity() {
         if (isFinishing) {
             saveNormalSession()
             tabs.closePrivateTabs()
+            if (browserPreferences.clearDataOnQuit) RuntimePreferences.clearOnQuit(runtime, historyStore, sessionStore)
         }
         extensionsUi.cancelPendingPrompts()
         extensionManager.host = null
@@ -305,9 +306,8 @@ class MainActivity : Activity() {
     }
 
     private fun openIntentUri(intent: Intent?): Boolean {
-        val uri = intent?.dataString?.takeIf {
-            intent.action == Intent.ACTION_VIEW && (it.startsWith("http://") || it.startsWith("https://"))
-        } ?: return false
+        // Links, shared text, web searches, and "Search with Kernel" selections from other apps.
+        val uri = IncomingIntentReader.urlFor(intent, browserPreferences.searchEngine) ?: return false
 
         val tab = tabs.create(TabMode.NORMAL)
         attachTab(tab)
@@ -1303,8 +1303,7 @@ class MainActivity : Activity() {
             openDownload = ::openDownload,
             removeDownload = ::removeDownload,
             resetBrowserState = ::resetBrowserState,
-            historyProvider = { historyStore.entries() },
-            clearHistory = { historyStore.clear() },
+            historyStore = historyStore,
             openUrl = ::openHistoryEntry,
             onPreferencesChanged = {
                 searchRecommendationCache.clear()
@@ -1705,31 +1704,7 @@ class MainActivity : Activity() {
     }
 
     private fun applyRuntimePreferences() {
-        runtime.settings
-            .setFontSizeFactor(browserPreferences.pageZoomPercent / 100f)
-            .setLoginAutofillEnabled(browserPreferences.loginAutofill)
-            .setJavaScriptEnabled(browserPreferences.javascriptEnabled)
-            .setGlobalPrivacyControl(browserPreferences.trackingProtection)
-            .setFingerprintingProtection(browserPreferences.trackingProtection)
-        runtime.settings.contentBlocking
-            .setAntiTracking(if (browserPreferences.trackingProtection) ContentBlocking.AntiTracking.DEFAULT else ContentBlocking.AntiTracking.NONE)
-            .setSafeBrowsing(ContentBlocking.SafeBrowsing.DEFAULT)
-            .setCookieBehavior(
-                if (browserPreferences.blockThirdPartyCookies) {
-                    ContentBlocking.CookieBehavior.ACCEPT_FIRST_PARTY_AND_ISOLATE_OTHERS
-                } else {
-                    ContentBlocking.CookieBehavior.ACCEPT_ALL
-                }
-            )
-            .setCookieBehaviorPrivateMode(ContentBlocking.CookieBehavior.ACCEPT_FIRST_PARTY_AND_ISOLATE_OTHERS)
-            .setCookiePurging(browserPreferences.trackingProtection)
-            .setEnhancedTrackingProtectionLevel(
-                if (browserPreferences.trackingProtection) {
-                    ContentBlocking.EtpLevel.DEFAULT
-                } else {
-                    ContentBlocking.EtpLevel.NONE
-                }
-            )
+        RuntimePreferences.apply(runtime, browserPreferences)
     }
 
     private fun applyDesktopMode(tab: BrowserTab) {

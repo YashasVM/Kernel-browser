@@ -4,27 +4,43 @@ import android.content.Context
 
 class BrowserHistoryStore(context: Context) {
     private val preferences = context.getSharedPreferences("browser_history", Context.MODE_PRIVATE)
-    private var cache: List<Pair<String, String>>? = null
+    private var cache: List<BrowserHistoryCodec.Entry>? = null
+    private var pairs: List<Pair<String, String>>? = null
 
+    /** Newest first, as (title, url). */
     fun entries(): List<Pair<String, String>> {
-        return cache ?: BrowserHistoryCodec.decode(preferences.getString(KEY_ENTRIES, "[]")).also { cache = it }
+        return pairs ?: timedEntries().map { it.toPair() }.also { pairs = it }
+    }
+
+    /** Newest first, with visit times (0 for visits recorded before times were kept). */
+    fun timedEntries(): List<BrowserHistoryCodec.Entry> {
+        return cache ?: BrowserHistoryCodec.decodeEntries(preferences.getString(KEY_ENTRIES, "")).also { cache = it }
     }
 
     fun record(title: String, url: String) {
-        val current = entries()
+        val current = timedEntries()
         // Title, location, and load-finished callbacks all report the same visit; only write once.
-        if (current.firstOrNull() == (title.ifBlank { url } to url)) return
-        save(BrowserHistoryCodec.record(current, title, url))
+        val first = current.firstOrNull()
+        if (first != null && first.url == url && first.title == title.ifBlank { url }) return
+        save(BrowserHistoryCodec.recordEntry(current, title, url, System.currentTimeMillis()))
+    }
+
+    fun remove(url: String) {
+        val current = timedEntries()
+        if (current.none { it.url == url }) return
+        save(current.filterNot { it.url == url })
     }
 
     fun clear() {
         cache = emptyList()
+        pairs = emptyList()
         preferences.edit().remove(KEY_ENTRIES).apply()
     }
 
-    private fun save(entries: List<Pair<String, String>>) {
+    private fun save(entries: List<BrowserHistoryCodec.Entry>) {
         cache = entries
-        preferences.edit().putString(KEY_ENTRIES, BrowserHistoryCodec.encode(entries)).apply()
+        pairs = null
+        preferences.edit().putString(KEY_ENTRIES, BrowserHistoryCodec.encodeEntries(entries)).apply()
     }
 
     private companion object {

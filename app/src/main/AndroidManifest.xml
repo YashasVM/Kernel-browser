@@ -35,6 +35,47 @@
                 <data android:scheme="http" />
                 <data android:scheme="https" />
             </intent-filter>
+            <!-- Links that also declare a web MIME type. With the filter above and the
+                 APP_BROWSER one below, this makes Kernel eligible as the default browser. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+
+                <data android:scheme="http" />
+                <data android:scheme="https" />
+                <data android:mimeType="text/html" />
+                <data android:mimeType="text/plain" />
+                <data android:mimeType="application/xhtml+xml" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.APP_BROWSER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.WEB_SEARCH" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <!-- Share > Kernel: opens a shared link, or searches for shared text. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+            <!-- "Search with Kernel" in other apps' text selection menus. -->
+            <intent-filter android:label="@string/process_text_search">
+                <action android:name="android.intent.action.PROCESS_TEXT" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+
+                <data android:mimeType="text/plain" />
+            </intent-filter>
         </activity>
     </application>
 </manifest>
