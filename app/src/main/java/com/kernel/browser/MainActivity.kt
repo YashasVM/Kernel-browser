@@ -77,6 +77,10 @@ class MainActivity : Activity() {
     private lateinit var browserPreferences: BrowserPreferences
     private lateinit var snackbar: KernelSnackbar
     private lateinit var webPrompts: WebPrompts
+    private lateinit var mediaPlayback: MediaPlaybackController
+    private lateinit var pictureInPicture: PictureInPictureController
+    private lateinit var pagePrinter: PagePrinter
+    private val pageTranslator = PageTranslator { showMessage(it) }
     private val tabThumbnails = mutableMapOf<Long, Bitmap>()
     private var bottomInset = 0
     private var chromeHidden = false
@@ -139,6 +143,7 @@ class MainActivity : Activity() {
         configureSystemBars()
         snackbar = KernelSnackbar(binding.root, bottomOffset = ::snackbarOffset, maxWidth = ::chromeWidth)
         webPrompts = WebPrompts(this) { message, action, onAction -> showMessage(message, action, onAction) }
+        configureWebFeatures()
 
         browserPreferences = BrowserPreferences(this)
         historyStore = BrowserHistoryStore(this)
@@ -200,6 +205,26 @@ class MainActivity : Activity() {
         openIntentUri(intent)
     }
 
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        pictureInPicture.onUserLeaveHint()
+    }
+
+    override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        // Only the video belongs in the floating window; bring the toolbar back on return.
+        if (isInPictureInPictureMode) {
+            snackbar.hide()
+            hideAddressSuggestions()
+            binding.bottomChrome.visibility = View.GONE
+        } else if (fullScreenSession == null) {
+            binding.bottomChrome.visibility = View.VISIBLE
+            chromeHidden = true
+            setChromeVisible(true)
+        }
+        pictureInPicture.onPictureInPictureModeChanged(isInPictureInPictureMode)
+    }
+
     override fun onPause() {
         chromeHandler.removeCallbacks(saveSessionRunnable)
         saveNormalSession()
@@ -215,6 +240,8 @@ class MainActivity : Activity() {
         extensionsUi.cancelPendingPrompts()
         extensionManager.host = null
         suggestionExecutor.shutdownNow()
+        mediaPlayback.release()
+        pictureInPicture.release()
         super.onDestroy()
     }
 
@@ -568,24 +595,36 @@ class MainActivity : Activity() {
         }
 
         tab.session.mediaSessionDelegate = object : MediaSession.Delegate {
+            override fun onActivated(session: GeckoSession, mediaSession: MediaSession) {
+                mediaPlayback.onActivated(tab, mediaSession)
+            }
+
+            override fun onMetadata(session: GeckoSession, mediaSession: MediaSession, meta: MediaSession.Metadata) {
+                mediaPlayback.onMetadata(tab, mediaSession, meta)
+            }
+
             override fun onPlay(session: GeckoSession, mediaSession: MediaSession) {
                 playingSessions += session
                 updateKeepScreenOn()
+                mediaPlayback.onPlay(tab, mediaSession)
             }
 
             override fun onPause(session: GeckoSession, mediaSession: MediaSession) {
                 playingSessions -= session
                 updateKeepScreenOn()
+                mediaPlayback.onPause(tab, mediaSession)
             }
 
             override fun onStop(session: GeckoSession, mediaSession: MediaSession) {
                 playingSessions -= session
                 updateKeepScreenOn()
+                mediaPlayback.onEnded(tab)
             }
 
             override fun onDeactivated(session: GeckoSession, mediaSession: MediaSession) {
                 playingSessions -= session
                 updateKeepScreenOn()
+                mediaPlayback.onEnded(tab)
             }
 
             override fun onFullscreen(
@@ -594,6 +633,7 @@ class MainActivity : Activity() {
                 enabled: Boolean,
                 meta: MediaSession.ElementMetadata?
             ) {
+                pictureInPicture.onMediaFullscreen(enabled, meta)
                 // Rotate landscape videos into landscape while they are fullscreen, like a video app.
                 requestedOrientation = if (enabled && meta != null && meta.width > meta.height) {
                     ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
@@ -602,6 +642,8 @@ class MainActivity : Activity() {
                 }
             }
         }
+
+        configureWebFeatures(tab)
 
         tab.session.permissionDelegate = object : GeckoSession.PermissionDelegate {
             override fun onAndroidPermissionsRequest(
@@ -1232,6 +1274,13 @@ class MainActivity : Activity() {
                     onClick = run(::openReaderView)),
                 KernelUi.item(this@MainActivity, "Copy link", icon = R.drawable.ic_link, tile = R.color.tile_blue,
                     onClick = run(::copyCurrentLink)),
+                KernelUi.item(this@MainActivity, if (pageTranslator.isTranslated(tab?.session)) "Show original" else "Translate page",
+                    subtitle = pageTranslator.describe(tab?.session), icon = R.drawable.ic_translate, tile = R.color.tile_teal,
+                    onClick = run { tab?.session?.let(pageTranslator::toggle) }),
+                KernelUi.item(this@MainActivity, "Print / Save as PDF", icon = R.drawable.ic_print, tile = R.color.tile_gray,
+                    onClick = run { tab?.session?.let(pagePrinter::print) }),
+                KernelUi.item(this@MainActivity, "Add to Home screen", icon = R.drawable.ic_add_home, tile = R.color.tile_purple,
+                    onClick = run(::addCurrentPageToHomeScreen)),
                 KernelUi.item(this@MainActivity, "Site info", subtitle = securitySummary(tab),
                     icon = if (tab?.isSecure == true) R.drawable.ic_lock else R.drawable.ic_info,
                     tile = if (tab?.isSecure == true) R.color.tile_green else R.color.tile_gray,
@@ -1899,6 +1948,7 @@ class MainActivity : Activity() {
 
     private fun updateKeepScreenOn() {
         playingSessions.retainAll { it.isOpen }
+        mediaPlayback.pruneClosedSessions()
         val activeSession = tabs.activeTab?.session
         if (activeSession != null && activeSession in playingSessions) {
             window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -1932,6 +1982,7 @@ class MainActivity : Activity() {
             binding.root.post { applyChromeWidth() }
             updateUi()
         }
+        pictureInPicture.onFullScreenChanged(fullScreenSession)
     }
 
     private fun setImmersiveBars(enabled: Boolean) {
@@ -2701,6 +2752,47 @@ class MainActivity : Activity() {
             putExtra(Intent.EXTRA_TEXT, text)
         }
         runCatching { startActivity(Intent.createChooser(intent, "Share")) }
+    }
+
+    /** Media notification, picture-in-picture, and printing; see MediaPlaybackController etc. */
+    private fun configureWebFeatures() {
+        pictureInPicture = PictureInPictureController(
+            activity = this,
+            isPlaying = { session -> mediaPlayback.isPlaying(session) },
+            onDismissed = { session ->
+                mediaPlayback.pause(session)
+                session.exitFullScreen()
+            }
+        )
+        mediaPlayback = MediaPlaybackController(this) { pictureInPicture.onPlaybackChanged() }
+        pagePrinter = PagePrinter(
+            activity = this,
+            jobName = { tabs.activeTab?.title?.takeIf { it.isNotBlank() } ?: getString(R.string.app_name) },
+            onError = { showMessage(it) }
+        )
+    }
+
+    /** Text selection toolbar, printing (incl. window.print()), and page translation for [tab]. */
+    private fun configureWebFeatures(tab: BrowserTab) {
+        tab.session.selectionActionDelegate = KernelSelectionActionDelegate(
+            activity = this,
+            searchLabel = { "Search ${browserPreferences.searchEngine.displayName}" },
+            onSearch = { query ->
+                openChildTab(tab, WebFeatureLogic.searchUrl(browserPreferences.searchEngine.searchUrl, query), background = false)
+            },
+            onShare = { text -> shareText("", text) }
+        )
+        tab.session.printDelegate = pagePrinter
+        tab.session.translationsSessionDelegate = pageTranslator.delegate
+    }
+
+    private fun addCurrentPageToHomeScreen() {
+        val tab = tabs.activeTab ?: return
+        if (!WebFeatureLogic.canPinShortcut(tab.url)) {
+            showMessage("Only web pages can be added to the Home screen")
+            return
+        }
+        HomeShortcuts.pin(this, tab.title, tab.url)?.let { showMessage(it) }
     }
 
     private companion object {
