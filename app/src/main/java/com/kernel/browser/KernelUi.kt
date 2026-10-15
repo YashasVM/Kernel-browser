@@ -32,7 +32,8 @@ object KernelUi {
             letterSpacing = 0.06f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(context.getColor(R.color.kernel_muted))
-            setPadding(dp(context, 18), dp(context, 22), dp(context, 18), dp(context, 8))
+            // 16dp: the same start inset as the rows in the group below, so the text lines up.
+            setPadding(dp(context, 16), dp(context, 24), dp(context, 16), dp(context, 8))
         }
     }
 
@@ -42,7 +43,7 @@ object KernelUi {
             textSize = 13f
             setLineSpacing(dp(context, 2).toFloat(), 1f)
             setTextColor(context.getColor(R.color.kernel_muted))
-            setPadding(dp(context, 18), dp(context, 8), dp(context, 18), 0)
+            setPadding(dp(context, 16), dp(context, 8), dp(context, 16), 0)
         }
     }
 
@@ -86,7 +87,7 @@ object KernelUi {
             }
             addView(ImageView(context).apply {
                 setImageResource(icon)
-                imageTintList = ColorStateList.valueOf(context.getColor(android.R.color.white))
+                imageTintList = ColorStateList.valueOf(context.getColor(R.color.kernel_on_tile))
                 scaleType = ImageView.ScaleType.FIT_CENTER
             }, FrameLayout.LayoutParams(dp(context, 19), dp(context, 19), Gravity.CENTER))
         }
@@ -102,7 +103,7 @@ object KernelUi {
             gravity = Gravity.CENTER
             textSize = 15f
             typeface = Typeface.DEFAULT_BOLD
-            setTextColor(context.getColor(android.R.color.white))
+            setTextColor(context.getColor(R.color.kernel_on_tile))
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
             background = GradientDrawable().apply {
                 setColor(context.getColor(palette[(key.hashCode() and 0x7fffffff) % palette.size]))

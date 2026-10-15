@@ -178,6 +178,14 @@ class MainActivity : Activity() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
+        if (KernelTheme.consumeNightModeChange(window, newConfig)) {
+            // Light/dark switch: the activity handles uiMode itself so tabs and private
+            // sessions survive; re-tint the views that were inflated with the old palette.
+            configureSystemBars()
+            KernelTheme.refreshChrome(binding)
+            binding.addressPill.tag = null
+            updateUi()
+        }
         // The activity handles rotation itself, so the floating toolbar must be resized here;
         // otherwise it keeps the width it had in the previous orientation.
         binding.root.post { applyChromeWidth() }
@@ -446,7 +454,7 @@ class MainActivity : Activity() {
         }
         window.statusBarColor = getColor(R.color.kernel_background)
         window.navigationBarColor = getColor(R.color.kernel_background)
-        window.decorView.systemUiVisibility = 0
+        KernelTheme.applySystemBarAppearance(window)
     }
 
     private fun configureInsets() {
@@ -1122,7 +1130,7 @@ class MainActivity : Activity() {
             cornerRadius = ChromeSheet.dp(this@MainActivity, 16).toFloat()
         }.let { shape ->
             android.graphics.drawable.RippleDrawable(
-                ColorStateList.valueOf(0x33FFFFFF), shape, shape
+                ColorStateList.valueOf(getColor(R.color.kernel_ripple)), shape, shape
             )
         }
     }
@@ -1218,6 +1226,9 @@ class MainActivity : Activity() {
                 addView(quickAction(R.drawable.ic_add, "New tab", run { openNewTab(TabMode.NORMAL) }))
             }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
                 bottomMargin = ChromeSheet.dp(this@MainActivity, 4)
+                // Each tile has 4dp side margins; pull the row out so its edges line up with the groups below.
+                marginStart = -ChromeSheet.dp(this@MainActivity, 4)
+                marginEnd = -ChromeSheet.dp(this@MainActivity, 4)
             })
 
             addView(KernelUi.sectionHeader(this@MainActivity, "This page"))
@@ -1266,6 +1277,7 @@ class MainActivity : Activity() {
                 cornerRadius = ChromeSheet.dp(this@MainActivity, 16).toFloat()
             }
             foreground = selectableItemBackground()
+            clipToOutline = true
             isClickable = true
             isFocusable = true
             contentDescription = label
@@ -1957,7 +1969,7 @@ class MainActivity : Activity() {
             window.decorView.systemUiVisibility = if (enabled) {
                 View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
             } else {
-                0
+                KernelTheme.lightSystemBarFlags(this)
             }
         }
     }
@@ -2246,17 +2258,10 @@ class MainActivity : Activity() {
         val loading = tab?.isLoading == true
         val editing = binding.addressBar.hasFocus()
         val showClear = editing && binding.addressBar.text.isNotEmpty()
-        binding.reloadButton.text = ""
         binding.reloadButton.visibility = if (editing && !showClear) View.GONE else View.VISIBLE
-        binding.reloadButton.setCompoundDrawablesWithIntrinsicBounds(
-            0,
-            if (loading || showClear) R.drawable.ic_close else R.drawable.ic_refresh,
-            0,
-            0
-        )
+        binding.reloadButton.setImageResource(if (loading || showClear) R.drawable.ic_close else R.drawable.ic_refresh)
         val count = tabs.count()
         binding.tabsCount.text = if (count > 99) "∞" else count.toString()
-        binding.extensionsButton.text = ""
         binding.backButton.contentDescription = getString(R.string.action_back)
         binding.forwardButton.contentDescription = getString(R.string.action_forward)
         binding.reloadButton.contentDescription = when {

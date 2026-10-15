@@ -42,7 +42,7 @@ class KernelSnackbar(
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             minimumHeight = dp(48)
-            setPadding(dp(18), dp(6), dp(if (action != null) 6 else 18), dp(6))
+            setPaddingRelative(dp(16), dp(4), dp(if (action != null) 4 else 16), dp(4))
             background = GradientDrawable().apply {
                 setColor(context.getColor(R.color.kernel_snackbar))
                 cornerRadius = dp(16).toFloat()
@@ -53,7 +53,7 @@ class KernelSnackbar(
                 textSize = 14f
                 maxLines = 2
                 ellipsize = TextUtils.TruncateAt.END
-                setTextColor(context.getColor(R.color.kernel_text))
+                setTextColor(context.getColor(R.color.kernel_snackbar_text))
             }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             if (action != null) {
                 addView(TextView(context).apply {
@@ -62,10 +62,10 @@ class KernelSnackbar(
                     typeface = Typeface.DEFAULT_BOLD
                     gravity = Gravity.CENTER
                     minWidth = dp(64)
-                    minHeight = dp(40)
+                    minHeight = dp(48)
                     setPadding(dp(12), 0, dp(12), 0)
-                    setTextColor(context.getColor(R.color.kernel_accent))
-                    background = KernelUi.selectableItemBackground(context)
+                    setTextColor(context.getColor(R.color.kernel_snackbar_action))
+                    background = context.getDrawable(R.drawable.toolbar_button_background)
                     isClickable = true
                     isFocusable = true
                     setOnClickListener {

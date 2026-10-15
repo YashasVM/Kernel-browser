@@ -1,0 +1,4 @@
+<resources>
+    <!-- Dark status/navigation bar icons on the light palette; values-night flips this. -->
+    <bool name="kernel_light_system_bars">true</bool>
+</resources>
