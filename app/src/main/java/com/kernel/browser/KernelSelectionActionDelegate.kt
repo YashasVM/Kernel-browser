@@ -2,6 +2,8 @@ package com.kernel.browser
 
 import android.app.Activity
 import android.content.Intent
+import android.view.ActionMode
+import android.view.Menu
 import android.view.MenuItem
 import org.mozilla.geckoview.BasicSelectionActionDelegate
 import org.mozilla.geckoview.GeckoSession
@@ -41,6 +43,19 @@ class KernelSelectionActionDelegate(
             return !isPassword && WebFeatureLogic.selectionQuery(selection.text) != null
         }
         return super.isActionAvailable(id)
+    }
+
+    override fun onPrepareActionMode(actionMode: ActionMode, menu: Menu): Boolean {
+        var changed = super.onPrepareActionMode(actionMode, menu)
+        // Kernel's own "Search with Kernel" text-processing entry duplicates the Search action.
+        for (index in 0 until menu.size()) {
+            val item = menu.getItem(index)
+            if (item.isVisible && item.intent?.component?.packageName == mActivity.packageName) {
+                item.setVisible(false)
+                changed = true
+            }
+        }
+        return changed
     }
 
     override fun prepareAction(id: String, item: MenuItem) {
