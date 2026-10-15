@@ -4,7 +4,9 @@ import android.annotation.SuppressLint
 import android.app.Dialog
 import android.content.Context
 import android.content.res.ColorStateList
+import android.content.res.Configuration
 import android.graphics.Bitmap
+import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
@@ -40,10 +42,16 @@ import kotlin.math.max
 import kotlin.math.sign
 
 /**
- * Full-screen tab switcher: a Tabs / Private segmented control, a grid of
- * thumbnail cards (tap to switch, swipe or x to close), an inline undo bar,
- * and a bottom bar with Close all, New tab, and Done. Closing re-renders the
- * grid in place so the switcher never flickers shut and open again.
+ * Full-screen tab switcher: a Tabs / Private segmented control, a search field, a grid of
+ * cards (tap to switch, swipe or x to close), an inline undo bar, and a bottom bar with
+ * Close all, New tab, and Done. Closing re-renders the grid in place so the switcher never
+ * flickers shut and open again.
+ *
+ * Layout grid: everything sits on a 4dp grid with a 16dp outer gutter that the segmented
+ * control, search field, cards, and the bottom bar's text all share, and every tappable
+ * element is at least 48dp. Icons are separate ImageViews centered by their parent's
+ * gravity, never compound drawables, so an icon always sits next to its label.
+ * Private mode uses the same violet as the private address bar.
  */
 class TabSwitcherDialogController(
     private val context: Context,
@@ -66,18 +74,37 @@ class TabSwitcherDialogController(
     private lateinit var scroll: ScrollView
     private lateinit var grid: LinearLayout
     private lateinit var emptyState: LinearLayout
-    private lateinit var normalSegment: TextView
-    private lateinit var privateSegment: TextView
+    private lateinit var normalSegment: Segment
+    private lateinit var privateSegment: Segment
     private lateinit var searchField: EditText
     private lateinit var closeAllButton: TextView
+    private lateinit var newTabButton: FrameLayout
+    private lateinit var newTabIcon: ImageView
     private lateinit var undoBar: LinearLayout
+
+    /** One half of the segmented control: icon, label, and count, centered together. */
+    private class Segment(val root: LinearLayout, val icon: ImageView, val label: TextView, val count: TextView)
 
     private fun dp(value: Int): Int = KernelUi.dp(context, value)
 
     private fun color(res: Int): Int = context.getColor(res)
 
+    private val privateMode: Boolean
+        get() = mode == TabMode.PRIVATE
+
+    /** Accent for the current mode: blue for normal tabs, violet for private ones. */
+    private fun modeAccent(): Int = color(if (privateMode) R.color.kernel_private_accent else R.color.kernel_accent)
+
+    private fun rounded(fill: Int, radiusDp: Int, strokeColor: Int? = null, strokeDp: Int = 1): GradientDrawable {
+        return GradientDrawable().apply {
+            setColor(fill)
+            cornerRadius = dp(radiusDp).toFloat()
+            if (strokeColor != null) setStroke(dp(strokeDp), strokeColor)
+        }
+    }
+
     fun show() {
-        dialog = Dialog(context, android.R.style.Theme_Material_NoActionBar)
+        dialog = Dialog(context, R.style.KernelFullScreenDialog)
         host = FrameLayout(context).apply {
             setBackgroundColor(color(R.color.kernel_background))
             fitsSystemWindows = true
@@ -95,14 +122,15 @@ class TabSwitcherDialogController(
                 clipToPadding = false
                 addView(LinearLayout(context).apply {
                     orientation = LinearLayout.VERTICAL
-                    setPadding(dp(GUTTER_DP), dp(4), dp(GUTTER_DP), dp(88))
+                    // Bottom padding keeps the last row clear of the floating undo bar.
+                    setPadding(dp(GUTTER_DP), dp(8), dp(GUTTER_DP), dp(80))
                     grid = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
                     emptyState = LinearLayout(context).apply {
                         orientation = LinearLayout.VERTICAL
                         gravity = Gravity.CENTER_HORIZONTAL
                     }
-                    addView(grid)
-                    addView(emptyState)
+                    addView(grid, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                    addView(emptyState, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
                 })
             }
             addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
@@ -119,7 +147,8 @@ class TabSwitcherDialogController(
             Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
         ).apply { bottomMargin = dp(BOTTOM_BAR_DP + 12) })
 
-        // Re-flow the grid when the window width changes (rotation, split screen).
+        // Re-flow the grid when the window width changes (rotation, split screen). Height
+        // changes alone (the keyboard opening for search) keep the current layout.
         host.addOnLayoutChangeListener { _, left, _, right, _, oldLeft, _, oldRight, _ ->
             val oldWidth = oldRight - oldLeft
             if (oldWidth > 0 && oldWidth != right - left) host.post { render(animate = false) }
@@ -132,6 +161,7 @@ class TabSwitcherDialogController(
             addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS)
             statusBarColor = color(R.color.kernel_background)
             navigationBarColor = color(R.color.kernel_background)
+            KernelTheme.applySystemBarAppearance(this)
             setSoftInputMode(
                 WindowManager.LayoutParams.SOFT_INPUT_STATE_HIDDEN or WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
             )
@@ -147,13 +177,16 @@ class TabSwitcherDialogController(
 
     // region rendering
 
+    private fun isLandscape(): Boolean =
+        context.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+
     private fun render(animate: Boolean) {
         if (!::grid.isInitialized) return
         val normalCount = tabsIn(TabMode.NORMAL).size
         val privateCount = tabsIn(TabMode.PRIVATE).size
-        styleSegment(normalSegment, "Tabs ($normalCount)", "$normalCount open tabs", mode == TabMode.NORMAL, R.color.kernel_accent)
-        styleSegment(privateSegment, "Private ($privateCount)", "$privateCount private tabs", mode == TabMode.PRIVATE, R.color.tile_purple)
-        searchField.hint = if (mode == TabMode.PRIVATE) "Search private tabs" else "Search tabs"
+        styleSegment(normalSegment, normalCount, selected = !privateMode, private = false)
+        styleSegment(privateSegment, privateCount, selected = privateMode, private = true)
+        styleModeChrome()
 
         val segmentTabs = tabsIn(mode)
         setEnabledLook(closeAllButton, segmentTabs.isNotEmpty())
@@ -171,12 +204,17 @@ class TabSwitcherDialogController(
         }
         emptyState.visibility = View.GONE
 
+        // Measure against the content box: fitsSystemWindows pads the host for a side
+        // navigation bar in landscape, and the cards only get what is left.
         val density = context.resources.displayMetrics.density
-        val widthPx = host.width.takeIf { it > 0 } ?: context.resources.displayMetrics.widthPixels
+        val hostWidth = host.width.takeIf { it > 0 } ?: context.resources.displayMetrics.widthPixels
+        val widthPx = hostWidth - host.paddingLeft - host.paddingRight
         val columns = TabSwitcherLogic.columnsFor((widthPx / density).toInt())
         val gap = dp(GAP_DP)
         val cardWidth = (widthPx - dp(GUTTER_DP) * 2 - gap * (columns - 1)) / columns
-        val thumbHeight = (cardWidth * 1.08f).toInt()
+        // Thumbnails are captured in the current orientation; match their shape so the
+        // top-crop shows the same part of the page in portrait and landscape.
+        val thumbHeight = (cardWidth * if (isLandscape()) LANDSCAPE_THUMB_RATIO else PORTRAIT_THUMB_RATIO).toInt()
         val activeId = tabs.activeTab?.id
 
         visible.chunked(columns).forEachIndexed { rowIndex, rowTabs ->
@@ -186,6 +224,8 @@ class TabSwitcherDialogController(
             }
             for (column in 0 until columns) {
                 val tab = rowTabs.getOrNull(column)
+                // Equal weights with a leading gap on every column but the first give
+                // equal card widths and equal gutters; empty slots keep the last row aligned.
                 val params = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
                     if (column > 0) marginStart = gap
                 }
@@ -196,7 +236,7 @@ class TabSwitcherDialogController(
             })
             if (animate) {
                 row.alpha = 0f
-                row.translationY = dp(14).toFloat()
+                row.translationY = dp(16).toFloat()
                 row.animate()
                     .alpha(1f)
                     .translationY(0f)
@@ -208,6 +248,25 @@ class TabSwitcherDialogController(
         }
     }
 
+    /** Colors that follow the mode: search field, new-tab button, and Done. */
+    private fun styleModeChrome() {
+        searchField.hint = if (privateMode) "Search private tabs" else "Search tabs"
+        searchField.background = if (privateMode) {
+            rounded(color(R.color.kernel_private_surface), 24, color(R.color.kernel_private_border))
+        } else {
+            rounded(color(R.color.kernel_group), 24, color(R.color.kernel_border))
+        }
+        newTabButton.background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(modeAccent())
+        }
+        newTabButton.contentDescription = if (privateMode) "New private tab" else "New tab"
+        newTabIcon.imageTintList = ColorStateList.valueOf(
+            color(if (privateMode) R.color.kernel_on_private_accent else R.color.kernel_on_accent)
+        )
+        doneButton.setTextColor(modeAccent())
+    }
+
     private fun scrollToActiveTab() {
         val activeId = tabs.activeTab?.id ?: return
         val visible = tabsIn(mode)
@@ -216,12 +275,12 @@ class TabSwitcherDialogController(
         scroll.post {
             val columns = (grid.getChildAt(0) as? LinearLayout)?.childCount ?: return@post
             val row = grid.getChildAt(index / columns) ?: return@post
-            scroll.scrollTo(0, (row.top - dp(12)).coerceAtLeast(0))
+            scroll.scrollTo(0, (row.top - dp(8)).coerceAtLeast(0))
         }
     }
 
     private fun buildEmptyState(searching: Boolean) {
-        val private = mode == TabMode.PRIVATE
+        val private = privateMode
         val (title, body) = when {
             searching -> "No matching tabs" to "Nothing in ${if (private) "private" else "your"} tabs matches “$query”."
             private -> "No private tabs" to
@@ -230,9 +289,14 @@ class TabSwitcherDialogController(
         }
         emptyState.setPadding(dp(24), dp(56), dp(24), dp(24))
         emptyState.addView(
-            KernelUi.iconTile(context, if (private) R.drawable.ic_private else R.drawable.ic_tabs,
-                if (private) R.color.tile_purple else R.color.tile_blue).apply { importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO },
-            LinearLayout.LayoutParams(dp(56), dp(56)).apply { bottomMargin = dp(18) }
+            KernelUi.iconTile(context, when {
+                searching -> R.drawable.ic_search
+                private -> R.drawable.ic_private
+                else -> R.drawable.ic_tabs
+            }, if (private) R.color.tile_purple else R.color.tile_blue).apply {
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            },
+            LinearLayout.LayoutParams(dp(56), dp(56)).apply { bottomMargin = dp(16) }
         )
         emptyState.addView(TextView(context).apply {
             text = title
@@ -240,22 +304,32 @@ class TabSwitcherDialogController(
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
             setTextColor(color(R.color.kernel_text))
-        })
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         emptyState.addView(TextView(context).apply {
             text = body
             textSize = 14f
             gravity = Gravity.CENTER
             setLineSpacing(dp(2).toFloat(), 1f)
             setTextColor(color(R.color.kernel_muted))
-            setPadding(0, dp(8), 0, dp(22))
             maxWidth = dp(320)
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = dp(8)
         })
         if (!searching) {
             emptyState.addView(
                 ChromeSheet.actionButton(context, if (private) "Open private tab" else "Open new tab", primary = true) {
                     openNewTab()
-                }.apply { minHeight = dp(48) },
-                LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                }.apply {
+                    minHeight = dp(48)
+                    setPadding(dp(24), 0, dp(24), 0)
+                    if (private) {
+                        backgroundTintList = ColorStateList.valueOf(color(R.color.kernel_private_accent))
+                        setTextColor(color(R.color.kernel_on_private_accent))
+                    }
+                },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                    topMargin = dp(24)
+                }
             )
         }
     }
@@ -264,10 +338,16 @@ class TabSwitcherDialogController(
 
     // region tab cards
 
+    /**
+     * A card is a 48dp header (site mark, title, close) above a thumbnail. The close
+     * button lives in the header row, so its glyph shares the title's center line
+     * instead of floating over the page image.
+     */
     private fun tabCard(tab: BrowserTab, active: Boolean, thumbHeight: Int): View {
         val title = TabSwitcherLogic.displayTitle(tab.title, tab.url, tab.isPrivate)
         val hostLabel = TabSwitcherLogic.displayHost(tab.url).ifEmpty { if (tab.isPrivate) "Private" else "Start page" }
-        val radius = dp(16).toFloat()
+        val radius = dp(CARD_RADIUS_DP).toFloat()
+        val accent = color(if (tab.isPrivate) R.color.kernel_private_accent else R.color.kernel_accent)
 
         lateinit var card: SwipeCard
         card = SwipeCard(
@@ -284,87 +364,94 @@ class TabSwitcherDialogController(
             contentDescription = buildString {
                 append(title)
                 append(", ").append(hostLabel)
+                if (tab.isPrivate) append(", private")
                 if (active) append(", current tab")
             }
         }
 
         val body = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
         }
+
+        val header = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPaddingRelative(dp(12), 0, 0, 0)
+        }
+        header.addView(siteMark(tab, hostLabel), LinearLayout.LayoutParams(dp(MARK_DP), dp(MARK_DP)))
+        header.addView(TextView(context).apply {
+            text = title
+            textSize = 13f
+            typeface = Typeface.DEFAULT_BOLD
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+            includeFontPadding = false
+            textAlignment = View.TEXT_ALIGNMENT_VIEW_START
+            setTextColor(if (active) accent else color(R.color.kernel_text))
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+            marginStart = dp(8)
+        })
+        header.addView(ImageView(context).apply {
+            setImageResource(R.drawable.ic_close)
+            imageTintList = ColorStateList.valueOf(color(R.color.kernel_muted))
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            // 48dp target around an 18dp glyph.
+            setPadding(dp(15), dp(15), dp(15), dp(15))
+            background = context.getDrawable(R.drawable.circle_button_background)
+            contentDescription = "Close $title"
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { card.dismissAnimated(1f) }
+        }, LinearLayout.LayoutParams(dp(48), dp(48)))
+        body.addView(header, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)))
 
         val thumbnail = thumbnailProvider(tab)
         body.addView(FrameLayout(context).apply {
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
             setBackgroundColor(color(R.color.kernel_surface_elevated))
             if (thumbnail != null) {
                 addView(TopCropImageView(context).apply { setImageBitmap(thumbnail) },
                     FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
             } else {
-                setBackgroundColor(color(R.color.kernel_group))
                 addView(
                     KernelUi.iconTile(context, if (tab.isPrivate) R.drawable.ic_private else R.drawable.ic_globe,
                         if (tab.isPrivate) R.color.tile_purple else R.color.tile_blue),
-                    FrameLayout.LayoutParams(dp(44), dp(44), Gravity.CENTER)
+                    FrameLayout.LayoutParams(dp(48), dp(48), Gravity.CENTER)
                 )
             }
         }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, thumbHeight))
-
-        body.addView(View(context).apply { setBackgroundColor(color(R.color.kernel_divider)) },
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1))
-
-        body.addView(LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), dp(9), dp(12), dp(11))
-            addView(TextView(context).apply {
-                text = title
-                textSize = 14f
-                typeface = Typeface.DEFAULT_BOLD
-                maxLines = 1
-                ellipsize = TextUtils.TruncateAt.END
-                setTextColor(color(R.color.kernel_text))
-            })
-            addView(TextView(context).apply {
-                text = hostLabel
-                textSize = 12f
-                maxLines = 1
-                ellipsize = TextUtils.TruncateAt.END
-                setTextColor(color(R.color.kernel_muted))
-                setPadding(0, dp(2), 0, 0)
-            })
-        })
         card.addView(body, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
-        // Border drawn above the thumbnail so the active outline is never covered.
+        // Outline drawn above the thumbnail so the active ring is never covered. The stroke
+        // is inset by the drawable, so it follows the card's own corner radius exactly.
         card.addView(View(context).apply {
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
             background = GradientDrawable().apply {
-                setColor(android.graphics.Color.TRANSPARENT)
+                setColor(Color.TRANSPARENT)
                 cornerRadius = radius
-                if (active) setStroke(dp(3), color(R.color.kernel_accent))
-                else setStroke(1, color(R.color.kernel_divider))
+                if (active) setStroke(dp(2), accent) else setStroke(1, color(R.color.kernel_divider))
             }
         }, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
-        // 48dp touch target around a small visible close chip.
-        card.addView(FrameLayout(context).apply {
-            isClickable = true
-            isFocusable = true
-            contentDescription = "Close $title"
-            background = KernelUi.selectableItemBackground(context)
-            setOnClickListener { card.dismissAnimated(1f) }
-            addView(FrameLayout(context).apply {
-                background = GradientDrawable().apply {
-                    shape = GradientDrawable.OVAL
-                    setColor(color(R.color.kernel_scrim))
-                }
-                addView(ImageView(context).apply {
-                    setImageResource(R.drawable.ic_close)
-                    imageTintList = ColorStateList.valueOf(android.graphics.Color.WHITE)
-                }, FrameLayout.LayoutParams(dp(14), dp(14), Gravity.CENTER))
-            }, FrameLayout.LayoutParams(dp(26), dp(26), Gravity.CENTER))
-        }, FrameLayout.LayoutParams(dp(48), dp(48), Gravity.TOP or Gravity.END))
-
         return card
+    }
+
+    /** 20dp mark at the start of a card header: the private icon, or the site's initial. */
+    private fun siteMark(tab: BrowserTab, hostLabel: String): View {
+        if (tab.isPrivate) {
+            return ImageView(context).apply {
+                setImageResource(R.drawable.ic_private)
+                imageTintList = ColorStateList.valueOf(color(R.color.kernel_private_accent))
+                scaleType = ImageView.ScaleType.FIT_CENTER
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            }
+        }
+        return KernelUi.letterTile(context, hostLabel, tab.url.ifBlank { hostLabel }).apply {
+            textSize = 11f
+            includeFontPadding = false
+            (background as? GradientDrawable)?.cornerRadius = dp(6).toFloat()
+        }
     }
 
     private fun selectFromSwitcher(tab: BrowserTab) {
@@ -385,50 +472,103 @@ class TabSwitcherDialogController(
 
     // region chrome
 
+    /**
+     * Two equal-width segments in a 56dp track (4dp inset, 48dp segments). The selected
+     * thumb's 12dp radius is the track's 16dp minus the inset, so the corners are concentric.
+     */
     private fun segmentedControl(): View {
         return LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(dp(4), dp(4), dp(4), dp(4))
-            background = GradientDrawable().apply {
-                setColor(color(R.color.kernel_group))
-                cornerRadius = dp(14).toFloat()
-            }
-            normalSegment = segment(R.drawable.ic_tabs) { switchMode(TabMode.NORMAL) }
-            privateSegment = segment(R.drawable.ic_private) { switchMode(TabMode.PRIVATE) }
-            addView(normalSegment, LinearLayout.LayoutParams(0, dp(48), 1f))
-            addView(privateSegment, LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginStart = dp(4) })
+            background = rounded(color(R.color.kernel_segment_track), 16)
+            normalSegment = segment(R.drawable.ic_tabs, "Tabs") { switchMode(TabMode.NORMAL) }
+            privateSegment = segment(R.drawable.ic_private, "Private") { switchMode(TabMode.PRIVATE) }
+            addView(normalSegment.root, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
+            addView(privateSegment.root, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply {
+                marginStart = dp(4)
+            })
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                setMargins(dp(GUTTER_DP), dp(10), dp(GUTTER_DP), dp(10))
+                setMargins(dp(GUTTER_DP), dp(8), dp(GUTTER_DP), dp(8))
             }
         }
     }
 
-    private fun segment(icon: Int, onClick: () -> Unit): TextView {
-        return TextView(context).apply {
-            gravity = Gravity.CENTER
+    /**
+     * The icon, label, and count are separate views in a centered row, so they are centered
+     * as one group and share a vertical center line. (A compound drawable on a full-width
+     * TextView would pin the icon to the segment's edge, away from its label.)
+     */
+    private fun segment(icon: Int, label: String, onClick: () -> Unit): Segment {
+        val iconView = ImageView(context).apply {
+            setImageResource(icon)
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }
+        val labelView = TextView(context).apply {
+            text = label
             textSize = 15f
             typeface = Typeface.DEFAULT_BOLD
             maxLines = 1
-            compoundDrawablePadding = dp(8)
-            context.getDrawable(icon)?.mutate()?.let { drawable ->
-                drawable.setBounds(0, 0, dp(18), dp(18))
-                setCompoundDrawablesRelative(drawable, null, null, null)
-            }
+            includeFontPadding = false
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }
+        val countView = TextView(context).apply {
+            textSize = 12f
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            maxLines = 1
+            includeFontPadding = false
+            minWidth = dp(24)
+            setPadding(dp(6), 0, dp(6), 0)
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }
+        val root = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            minimumHeight = dp(48)
+            setPadding(dp(8), 0, dp(8), 0)
+            // Ripple masked to the selected thumb's 12dp corners.
+            foreground = context.getDrawable(R.drawable.segment_ripple)
             isClickable = true
             isFocusable = true
             setOnClickListener { onClick() }
+            addView(iconView, LinearLayout.LayoutParams(dp(20), dp(20)))
+            addView(labelView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                marginStart = dp(8)
+            })
+            addView(countView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(20)).apply {
+                marginStart = dp(8)
+            })
         }
+        return Segment(root, iconView, labelView, countView)
     }
 
-    private fun styleSegment(view: TextView, label: String, description: String, selected: Boolean, iconColor: Int) {
-        view.text = label
-        view.contentDescription = description
-        view.isSelected = selected
-        view.setTextColor(color(if (selected) R.color.kernel_text else R.color.kernel_muted))
-        view.compoundDrawableTintList = ColorStateList.valueOf(color(if (selected) iconColor else R.color.kernel_muted))
-        view.background = GradientDrawable().apply {
-            setColor(if (selected) color(R.color.kernel_surface_alt) else android.graphics.Color.TRANSPARENT)
-            cornerRadius = dp(11).toFloat()
+    private fun styleSegment(segment: Segment, count: Int, selected: Boolean, private: Boolean) {
+        val accent = color(if (private) R.color.kernel_private_accent else R.color.kernel_accent)
+        val onAccent = color(if (private) R.color.kernel_on_private_accent else R.color.kernel_on_accent)
+        val muted = color(R.color.kernel_muted)
+
+        segment.root.isSelected = selected
+        segment.root.contentDescription = if (private) "Private tabs, $count open" else "Tabs, $count open"
+        segment.root.background = when {
+            selected && private -> rounded(color(R.color.kernel_private_surface), 12, color(R.color.kernel_private_border))
+            selected -> rounded(color(R.color.kernel_segment_thumb), 12)
+            else -> null
+        }
+        segment.icon.imageTintList = ColorStateList.valueOf(if (selected) accent else muted)
+        segment.label.setTextColor(
+            when {
+                !selected -> muted
+                private -> accent
+                else -> color(R.color.kernel_text)
+            }
+        )
+        segment.count.text = if (count > 99) "99+" else count.toString()
+        segment.count.setTextColor(if (selected) onAccent else muted)
+        segment.count.background = if (selected) {
+            rounded(accent, 10)
+        } else {
+            rounded(Color.TRANSPARENT, 10, muted)
         }
     }
 
@@ -447,18 +587,15 @@ class TabSwitcherDialogController(
             setSingleLine(true)
             imeOptions = EditorInfo.IME_ACTION_SEARCH
             setTextColor(color(R.color.kernel_text))
-            setHintTextColor(color(R.color.kernel_disabled))
-            background = GradientDrawable().apply {
-                setColor(color(R.color.kernel_group))
-                cornerRadius = dp(12).toFloat()
-            }
-            setPadding(dp(14), 0, dp(14), 0)
-            compoundDrawablePadding = dp(10)
+            setHintTextColor(color(R.color.kernel_muted))
+            gravity = Gravity.CENTER_VERTICAL or Gravity.START
+            setPaddingRelative(dp(16), 0, dp(16), 0)
+            compoundDrawablePadding = dp(12)
             context.getDrawable(R.drawable.ic_search)?.mutate()?.let { drawable ->
-                drawable.setBounds(0, 0, dp(18), dp(18))
+                drawable.setBounds(0, 0, dp(20), dp(20))
                 setCompoundDrawablesRelative(drawable, null, null, null)
             }
-            compoundDrawableTintList = ColorStateList.valueOf(color(R.color.kernel_disabled))
+            compoundDrawableTintList = ColorStateList.valueOf(color(R.color.kernel_muted))
             addTextChangedListener(object : TextWatcher {
                 override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
                 override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
@@ -476,55 +613,63 @@ class TabSwitcherDialogController(
                 }
             }
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)).apply {
-                setMargins(dp(GUTTER_DP), 0, dp(GUTTER_DP), dp(12))
+                setMargins(dp(GUTTER_DP), 0, dp(GUTTER_DP), 0)
             }
         }
     }
 
+    private lateinit var doneButton: TextView
+
+    /**
+     * Close all (start), New tab (center), Done (end) in a FrameLayout, so the round button
+     * is truly centered whatever the label widths, and both labels' text edges sit on the
+     * 16dp gutter (4dp bar inset + 12dp button padding).
+     */
     private fun bottomBar(): View {
-        return LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(8), 0, dp(8), 0)
+        return FrameLayout(context).apply {
+            setPadding(dp(4), 0, dp(4), 0)
             setBackgroundColor(color(R.color.kernel_background))
 
-            closeAllButton = textButton("Close all", R.color.kernel_danger, Gravity.START or Gravity.CENTER_VERTICAL) {
-                confirmCloseAll()
-            }
-            addView(closeAllButton, LinearLayout.LayoutParams(0, dp(48), 1f))
+            closeAllButton = textButton("Close all", R.color.kernel_danger) { confirmCloseAll() }
+            addView(closeAllButton, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, dp(48), Gravity.START or Gravity.CENTER_VERTICAL
+            ))
 
-            addView(FrameLayout(context).apply {
+            newTabIcon = ImageView(context).apply {
+                setImageResource(R.drawable.ic_add)
+                scaleType = ImageView.ScaleType.FIT_CENTER
+            }
+            newTabButton = FrameLayout(context).apply {
                 isClickable = true
                 isFocusable = true
-                contentDescription = "New tab"
-                background = GradientDrawable().apply {
-                    shape = GradientDrawable.OVAL
-                    setColor(color(R.color.kernel_accent))
-                }
                 foreground = KernelUi.selectableItemBackground(context)
+                // Clip the ripple to the circle instead of its square bounds.
+                clipToOutline = true
                 elevation = dp(4).toFloat()
                 setOnClickListener { openNewTab() }
-                addView(ImageView(context).apply {
-                    setImageResource(R.drawable.ic_add)
-                    imageTintList = ColorStateList.valueOf(color(R.color.kernel_on_accent))
-                }, FrameLayout.LayoutParams(dp(28), dp(28), Gravity.CENTER))
-            }, LinearLayout.LayoutParams(dp(56), dp(56)))
+                addView(newTabIcon, FrameLayout.LayoutParams(dp(24), dp(24), Gravity.CENTER))
+            }
+            addView(newTabButton, FrameLayout.LayoutParams(dp(56), dp(56), Gravity.CENTER))
 
-            addView(textButton("Done", R.color.kernel_accent, Gravity.END or Gravity.CENTER_VERTICAL) {
+            doneButton = textButton("Done", R.color.kernel_accent) {
                 hideKeyboard()
                 dialog.dismiss()
-            }.apply { typeface = Typeface.DEFAULT_BOLD }, LinearLayout.LayoutParams(0, dp(48), 1f))
+            }.apply { typeface = Typeface.DEFAULT_BOLD }
+            addView(doneButton, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, dp(48), Gravity.END or Gravity.CENTER_VERTICAL
+            ))
         }
     }
 
-    private fun textButton(label: String, colorRes: Int, textGravity: Int, onClick: () -> Unit): TextView {
+    private fun textButton(label: String, colorRes: Int, onClick: () -> Unit): TextView {
         return TextView(context).apply {
             text = label
             textSize = 16f
-            gravity = textGravity
+            gravity = Gravity.CENTER
+            minWidth = dp(64)
             setTextColor(color(colorRes))
             setPadding(dp(12), 0, dp(12), 0)
-            background = KernelUi.selectableItemBackground(context)
+            background = context.getDrawable(R.drawable.toolbar_button_background)
             isClickable = true
             isFocusable = true
             setOnClickListener { onClick() }
@@ -539,7 +684,7 @@ class TabSwitcherDialogController(
     private fun confirmCloseAll() {
         val count = tabsIn(mode).size
         if (count == 0) return
-        val private = mode == TabMode.PRIVATE
+        val private = privateMode
         val noun = if (private) "private tab" else "tab"
         val title = if (count == 1) "Close 1 $noun?" else "Close all $count ${noun}s?"
         val message = if (private) {
@@ -549,18 +694,17 @@ class TabSwitcherDialogController(
         }
         val targetMode = mode
         ChromeSheet.show(context, title = title, subtitle = message, scrollable = false) { sheet ->
-            addView(LinearLayout(context).apply {
-                orientation = LinearLayout.HORIZONTAL
-                addView(ChromeSheet.actionButton(context, "Cancel") { sheet.dismiss() },
-                    LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(6) })
-                addView(ChromeSheet.actionButton(context, "Close all", danger = true) {
+            addView(ChromeSheet.buttonRow(
+                context,
+                ChromeSheet.actionButton(context, "Cancel") { sheet.dismiss() },
+                ChromeSheet.actionButton(context, "Close all", danger = true) {
                     sheet.dismiss()
                     if (!dialog.isShowing) return@actionButton
                     closeTabs(targetMode)
                     hideUndoBar()
                     render(animate = true)
-                }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(6) })
-            })
+                }
+            ))
         }
     }
 
@@ -570,22 +714,21 @@ class TabSwitcherDialogController(
         createTab(mode)
     }
 
+    /** Matches KernelSnackbar: 48dp tall, 16dp corners, inverse surface. */
     private fun buildUndoBar(): LinearLayout {
         return LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             visibility = View.GONE
             elevation = dp(8).toFloat()
-            setPadding(dp(18), 0, dp(4), 0)
-            background = GradientDrawable().apply {
-                setColor(color(R.color.kernel_surface_alt))
-                cornerRadius = dp(24).toFloat()
-            }
+            minimumHeight = dp(48)
+            setPaddingRelative(dp(16), 0, dp(4), 0)
+            background = rounded(color(R.color.kernel_snackbar), 16)
             accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
             addView(TextView(context).apply {
                 text = "Tab closed"
                 textSize = 14f
-                setTextColor(color(R.color.kernel_text))
+                setTextColor(color(R.color.kernel_snackbar_text))
             })
             addView(TextView(context).apply {
                 text = "Undo"
@@ -593,9 +736,9 @@ class TabSwitcherDialogController(
                 typeface = Typeface.DEFAULT_BOLD
                 gravity = Gravity.CENTER
                 minWidth = dp(64)
-                setTextColor(color(R.color.kernel_accent))
-                setPadding(dp(14), 0, dp(14), 0)
-                background = KernelUi.selectableItemBackground(context)
+                setTextColor(color(R.color.kernel_snackbar_action))
+                setPadding(dp(12), 0, dp(12), 0)
+                background = context.getDrawable(R.drawable.toolbar_button_background)
                 contentDescription = "Undo close tab"
                 isClickable = true
                 isFocusable = true
@@ -807,7 +950,11 @@ class TabSwitcherDialogController(
     private companion object {
         const val GUTTER_DP = 16
         const val GAP_DP = 12
+        const val CARD_RADIUS_DP = 16
+        const val MARK_DP = 20
         const val BOTTOM_BAR_DP = 72
+        const val PORTRAIT_THUMB_RATIO = 1.1f
+        const val LANDSCAPE_THUMB_RATIO = 0.62f
         const val UNDO_TIMEOUT_MS = 4000L
     }
 }

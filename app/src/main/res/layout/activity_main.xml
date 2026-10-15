@@ -6,22 +6,22 @@
     android:background="@color/kernel_background"
     android:fitsSystemWindows="true">
 
-    <org.mozilla.geckoview.GeckoView
+    <com.kernel.browser.PullToRefreshGeckoView
         android:id="@+id/geckoView"
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
-    <ProgressBar
-        android:id="@+id/progressBar"
-        style="?android:attr/progressBarStyleHorizontal"
-        android:layout_width="match_parent"
-        android:layout_height="2dp"
-        android:layout_gravity="top"
-        android:indeterminate="false"
-        android:max="100"
-        android:progress="0"
-        android:progressTint="@color/kernel_accent"
-        android:visibility="gone" />
+    <ImageView
+        android:id="@+id/pullIndicator"
+        android:layout_width="44dp"
+        android:layout_height="44dp"
+        android:layout_gravity="top|center_horizontal"
+        android:background="@drawable/pull_indicator_background"
+        android:elevation="8dp"
+        android:importantForAccessibility="no"
+        android:padding="10dp"
+        android:src="@drawable/ic_refresh"
+        android:visibility="invisible" />
 
     <LinearLayout
         android:id="@+id/suggestionsPanel"
@@ -33,12 +33,18 @@
         android:background="@drawable/browser_chrome_background"
         android:elevation="18dp"
         android:orientation="vertical"
-        android:paddingStart="8dp"
-        android:paddingTop="8dp"
-        android:paddingEnd="8dp"
-        android:paddingBottom="8dp"
+        android:paddingStart="6dp"
+        android:paddingTop="6dp"
+        android:paddingEnd="6dp"
+        android:paddingBottom="6dp"
         android:visibility="gone" />
 
+    <!--
+        Floating toolbar. Vertical rhythm (all multiples of 4dp): 8dp top inset, 48dp address
+        pill, 4dp gap, 48dp button row. The row's -4dp bottom margin makes the bottom inset 8dp
+        when the row is hidden (typing, find) and gives 16dp of air above and below the
+        24dp toolbar icons when it is shown.
+    -->
     <LinearLayout
         android:id="@+id/bottomChrome"
         android:layout_width="match_parent"
@@ -53,89 +59,189 @@
         android:paddingStart="8dp"
         android:paddingTop="8dp"
         android:paddingEnd="8dp"
-        android:paddingBottom="6dp">
+        android:paddingBottom="8dp">
 
-        <LinearLayout
-            android:id="@+id/addressPill"
+        <FrameLayout
+            android:id="@+id/addressContainer"
             android:layout_width="match_parent"
-            android:layout_height="50dp"
-            android:background="@drawable/address_bar_background"
-            android:gravity="center_vertical"
-            android:orientation="horizontal"
-            android:paddingStart="12dp"
-            android:paddingEnd="4dp">
+            android:layout_height="48dp">
 
-            <ImageView
-                android:id="@+id/securityIcon"
-                android:layout_width="21dp"
-                android:layout_height="21dp"
-                android:contentDescription="@string/app_name"
-                android:src="@drawable/ic_shield"
-                android:tint="@color/kernel_muted" />
-
-            <EditText
-                android:id="@+id/addressBar"
-                android:layout_width="0dp"
+            <LinearLayout
+                android:id="@+id/addressPill"
+                android:layout_width="match_parent"
                 android:layout_height="match_parent"
-                android:layout_marginStart="8dp"
-                android:layout_weight="1"
-                android:autofillHints="url"
-                android:background="@android:color/transparent"
-                android:hint="@string/address_hint"
-                android:imeOptions="actionGo"
-                android:inputType="textUri|textNoSuggestions"
-                android:paddingStart="0dp"
-                android:paddingEnd="6dp"
-                android:selectAllOnFocus="true"
-                android:singleLine="true"
-                android:textColor="@color/kernel_text"
-                android:textColorHint="@color/kernel_muted"
-                android:textSize="16sp" />
+                android:background="@drawable/address_bar_background"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
 
-            <TextView
-                android:id="@+id/reloadButton"
-                style="@style/AddressActionButton"
-                android:drawableTop="@drawable/ic_refresh" />
-        </LinearLayout>
+                <ImageView
+                    android:id="@+id/securityIcon"
+                    style="@style/AddressActionButton"
+                    android:contentDescription="@string/address_hint"
+                    android:src="@drawable/ic_search" />
+
+                <EditText
+                    android:id="@+id/addressBar"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:autofillHints="url"
+                    android:background="@android:color/transparent"
+                    android:hint="@string/address_hint"
+                    android:imeOptions="actionGo|flagNoExtractUi"
+                    android:inputType="textUri|textNoSuggestions"
+                    android:paddingStart="0dp"
+                    android:paddingTop="0dp"
+                    android:paddingEnd="4dp"
+                    android:paddingBottom="0dp"
+                    android:selectAllOnFocus="true"
+                    android:singleLine="true"
+                    android:textColor="@color/kernel_text"
+                    android:textColorHint="@color/kernel_muted"
+                    android:textSize="16sp" />
+
+                <ImageButton
+                    android:id="@+id/reloadButton"
+                    style="@style/AddressActionButton"
+                    android:contentDescription="@string/action_reload"
+                    android:src="@drawable/ic_refresh" />
+            </LinearLayout>
+
+            <ProgressBar
+                android:id="@+id/progressBar"
+                style="?android:attr/progressBarStyleHorizontal"
+                android:layout_width="match_parent"
+                android:layout_height="2dp"
+                android:layout_gravity="bottom"
+                android:layout_marginStart="24dp"
+                android:layout_marginEnd="24dp"
+                android:layout_marginBottom="1dp"
+                android:indeterminate="false"
+                android:max="100"
+                android:progress="0"
+                android:progressDrawable="@drawable/address_progress"
+                android:visibility="gone" />
+        </FrameLayout>
 
         <LinearLayout
             android:id="@+id/bottomBar"
             android:layout_width="match_parent"
             android:layout_height="48dp"
             android:layout_marginTop="4dp"
+            android:layout_marginBottom="-4dp"
             android:baselineAligned="false"
             android:gravity="center"
             android:orientation="horizontal">
 
-            <TextView
+            <ImageButton
                 android:id="@+id/backButton"
                 style="@style/BrowserIconButton"
-                android:drawableTop="@drawable/ic_arrow_back" />
+                android:contentDescription="@string/action_back"
+                android:src="@drawable/ic_arrow_back" />
 
-            <TextView
+            <ImageButton
                 android:id="@+id/forwardButton"
                 style="@style/BrowserIconButton"
-                android:drawableTop="@drawable/ic_arrow_forward" />
+                android:contentDescription="@string/action_forward"
+                android:src="@drawable/ic_arrow_forward" />
 
-            <TextView
+            <ImageButton
                 android:id="@+id/homeButton"
                 style="@style/BrowserIconButton"
-                android:drawableTop="@drawable/ic_home" />
+                android:contentDescription="@string/action_home"
+                android:src="@drawable/ic_home" />
 
-            <TextView
+            <ImageButton
                 android:id="@+id/extensionsButton"
                 style="@style/BrowserIconButton"
-                android:drawableTop="@drawable/ic_extension" />
+                android:contentDescription="@string/action_extensions"
+                android:src="@drawable/ic_extension" />
 
-            <TextView
+            <FrameLayout
                 android:id="@+id/tabsButton"
-                style="@style/BrowserIconButton"
-                android:drawableTop="@drawable/ic_tabs" />
+                android:layout_width="0dp"
+                android:layout_height="48dp"
+                android:layout_weight="1"
+                android:background="@drawable/toolbar_button_background"
+                android:clickable="true"
+                android:contentDescription="@string/action_tabs"
+                android:focusable="true"
+                android:minWidth="48dp">
 
-            <TextView
+                <!-- 20dp box: the same optical size as the 24dp line icons beside it. -->
+                <TextView
+                    android:id="@+id/tabsCount"
+                    android:layout_width="20dp"
+                    android:layout_height="20dp"
+                    android:layout_gravity="center"
+                    android:background="@drawable/tab_count_background"
+                    android:gravity="center"
+                    android:importantForAccessibility="no"
+                    android:includeFontPadding="false"
+                    android:textColor="@color/kernel_text"
+                    android:textSize="11sp"
+                    android:textStyle="bold" />
+            </FrameLayout>
+
+            <ImageButton
                 android:id="@+id/settingsButton"
                 style="@style/BrowserIconButton"
-                android:drawableTop="@drawable/ic_settings" />
+                android:contentDescription="@string/action_menu"
+                android:src="@drawable/ic_menu_dots" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/findBar"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:background="@drawable/address_bar_background"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="16dp"
+            android:visibility="gone">
+
+            <EditText
+                android:id="@+id/findInput"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:background="@android:color/transparent"
+                android:hint="@string/find_hint"
+                android:imeOptions="actionSearch|flagNoExtractUi"
+                android:inputType="text"
+                android:paddingTop="0dp"
+                android:paddingBottom="0dp"
+                android:singleLine="true"
+                android:textColor="@color/kernel_text"
+                android:textColorHint="@color/kernel_muted"
+                android:textSize="16sp" />
+
+            <TextView
+                android:id="@+id/findCount"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:paddingStart="8dp"
+                android:paddingEnd="4dp"
+                android:textColor="@color/kernel_muted"
+                android:textSize="14sp" />
+
+            <ImageButton
+                android:id="@+id/findPrevious"
+                style="@style/AddressActionButton"
+                android:contentDescription="@string/find_previous"
+                android:src="@drawable/ic_expand_less" />
+
+            <ImageButton
+                android:id="@+id/findNext"
+                style="@style/AddressActionButton"
+                android:contentDescription="@string/find_next"
+                android:src="@drawable/ic_expand_more" />
+
+            <ImageButton
+                android:id="@+id/findClose"
+                style="@style/AddressActionButton"
+                android:contentDescription="@string/find_close"
+                android:src="@drawable/ic_close" />
         </LinearLayout>
     </LinearLayout>
 </FrameLayout>

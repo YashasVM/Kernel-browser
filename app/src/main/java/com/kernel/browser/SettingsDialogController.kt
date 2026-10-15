@@ -1,5 +1,6 @@
 package com.kernel.browser
 
+import android.app.Activity
 import android.app.Dialog
 import android.content.Context
 import android.content.res.ColorStateList
@@ -8,6 +9,8 @@ import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
+import android.text.Editable
+import android.text.TextWatcher
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
@@ -15,6 +18,7 @@ import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.animation.PathInterpolator
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageButton
@@ -46,8 +50,7 @@ class SettingsDialogController(
     private val openDownload: (DownloadStore.Entry) -> Unit,
     private val removeDownload: (DownloadStore.Entry) -> Unit,
     private val resetBrowserState: () -> Unit,
-    private val historyProvider: () -> List<Pair<String, String>>,
-    private val clearHistory: () -> Unit,
+    private val historyStore: BrowserHistoryStore,
     private val openUrl: (String) -> Unit,
     private val onPreferencesChanged: () -> Unit
 ) {
@@ -56,17 +59,30 @@ class SettingsDialogController(
     private lateinit var dialog: Dialog
     private lateinit var host: FrameLayout
 
+    /** Set while the system default-browser screen is open, so its result shows on return. */
+    private var awaitingDefaultBrowser = false
+
+    private fun historyProvider(): List<Pair<String, String>> = historyStore.entries()
+
+    private fun clearHistory() = historyStore.clear()
+
     private class Page(val title: String, val onLeave: () -> Unit = {}, val build: LinearLayout.() -> Unit)
 
     private class PageEntry(val page: Page, val view: View, val scroll: ScrollView, val content: LinearLayout)
 
     fun show() {
-        dialog = Dialog(context, android.R.style.Theme_Material_NoActionBar)
+        dialog = Dialog(context, R.style.KernelFullScreenDialog)
         host = FrameLayout(context).apply {
             setBackgroundColor(context.getColor(R.color.kernel_background))
             fitsSystemWindows = true
         }
         dialog.setContentView(host)
+        host.viewTreeObserver.addOnWindowFocusChangeListener { hasFocus ->
+            if (hasFocus && awaitingDefaultBrowser) {
+                awaitingDefaultBrowser = false
+                refresh()
+            }
+        }
         dialog.window?.apply {
             setBackgroundDrawable(ColorDrawable(context.getColor(R.color.kernel_background)))
             setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
@@ -190,6 +206,8 @@ class SettingsDialogController(
     // region main page
 
     private fun mainPage() = Page("Settings") {
+        addView(KernelUi.group(context, defaultBrowserRow()))
+
         addView(KernelUi.sectionHeader(context, "General"))
         addView(KernelUi.group(
             context,
@@ -210,20 +228,33 @@ class SettingsDialogController(
             KernelUi.item(context, "Text size", icon = R.drawable.ic_text_size, tile = R.color.tile_orange,
                 value = "${browserPreferences.pageZoomPercent}%", chevron = true) { push(textSizePage()) },
             KernelUi.item(context, "Autoplay", icon = R.drawable.ic_play, tile = R.color.tile_pink,
-                value = browserPreferences.autoplay.displayName, chevron = true) { push(autoplayPage()) }
+                value = browserPreferences.autoplay.displayName, chevron = true) { push(autoplayPage()) },
+            KernelUi.item(context, "Website theme", icon = R.drawable.ic_reader, tile = R.color.tile_purple,
+                value = browserPreferences.websiteTheme.displayName, chevron = true) { push(websiteThemePage()) },
+            KernelUi.toggle(context, "Zoom on all websites", subtitle = "Pinch to zoom even on sites that try to prevent it.",
+                icon = R.drawable.ic_search, tile = R.color.tile_gray, checked = browserPreferences.forceEnableZoom) {
+                browserPreferences.forceEnableZoom = it
+                onPreferencesChanged()
+            }
         ))
 
         addView(KernelUi.sectionHeader(context, "Privacy & security"))
         addView(KernelUi.group(
             context,
-            KernelUi.toggle(context, "Tracking protection", subtitle = "Block trackers, cryptominers, and fingerprinting.",
-                icon = R.drawable.ic_shield, tile = R.color.tile_green, checked = browserPreferences.trackingProtection) {
-                browserPreferences.trackingProtection = it
-                onPreferencesChanged()
+            KernelUi.item(context, "Tracking protection", subtitle = "Block trackers, cryptominers, and fingerprinting.",
+                icon = R.drawable.ic_shield, tile = R.color.tile_green, value = trackingLevelLabel(), chevron = true) {
+                push(trackingProtectionPage())
             },
+            KernelUi.item(context, "HTTPS-Only Mode", icon = R.drawable.ic_lock, tile = R.color.tile_indigo,
+                value = browserPreferences.httpsOnly.displayName, chevron = true) { push(httpsOnlyPage()) },
             KernelUi.toggle(context, "Isolate cross-site cookies", subtitle = "Stops sites following you around. Sign-ins keep working.",
                 icon = R.drawable.ic_cookie, tile = R.color.tile_orange, checked = browserPreferences.blockThirdPartyCookies) {
                 browserPreferences.blockThirdPartyCookies = it
+                onPreferencesChanged()
+            },
+            KernelUi.toggle(context, "Reduce cookie banners", subtitle = "Automatically refuse cookie pop-ups on sites that support it.",
+                icon = R.drawable.ic_cookie, tile = R.color.tile_teal, checked = browserPreferences.cookieBannerReduction) {
+                browserPreferences.cookieBannerReduction = it
                 onPreferencesChanged()
             },
             KernelUi.toggle(context, "JavaScript", subtitle = "Most sites need this. Turn off for a strict mode.",
@@ -236,7 +267,8 @@ class SettingsDialogController(
             KernelUi.item(context, "Site permissions", icon = R.drawable.ic_lock, tile = R.color.tile_blue, chevron = true) {
                 push(sitePermissionsPage())
             },
-            KernelUi.item(context, "Clear browsing data", icon = R.drawable.ic_delete, tile = R.color.tile_red, chevron = true) {
+            KernelUi.item(context, "Clear browsing data", icon = R.drawable.ic_delete, tile = R.color.tile_red,
+                value = if (browserPreferences.clearDataOnQuit) "On quit" else null, chevron = true) {
                 push(clearDataPage())
             }
         ))
@@ -279,20 +311,115 @@ class SettingsDialogController(
     // region general pages
 
     private fun searchEnginePage() = Page("Search engine") {
+        val custom = browserPreferences.customSearchEngine
+        val selected = browserPreferences.searchEngine
         addView(KernelUi.sectionHeader(context, "Default search"))
-        addView(KernelUi.group(context, SearchEngine.all.map { engine ->
-            KernelUi.choice(
+        addView(KernelUi.group(context, (SearchEngine.all + listOfNotNull(custom)).map { engine ->
+            val row = KernelUi.choice(
                 context,
                 title = engine.displayName,
-                subtitle = if (engine.suggestionsUrl != null) "Includes search suggestions" else null,
-                selected = browserPreferences.searchEngine == engine
+                subtitle = when {
+                    engine.isCustom -> displayHost(engine.searchUrl)
+                    engine.suggestionsUrl != null -> "Includes search suggestions"
+                    else -> null
+                },
+                selected = selected == engine
             ) {
                 browserPreferences.searchEngineId = engine.id
                 onPreferencesChanged()
                 refresh()
             }
+            if (engine.isCustom) {
+                row.addView(removeButton("Remove ${engine.displayName}") {
+                    confirm("Remove ${engine.displayName}?", "Search switches back to Google if it was your default.", "Remove") {
+                        browserPreferences.removeCustomSearchEngine()
+                        onPreferencesChanged()
+                        refresh()
+                    }
+                })
+            }
+            row
         }))
+        addView(KernelUi.sectionHeader(context, ""))
+        addView(KernelUi.group(context, KernelUi.item(
+            context,
+            if (custom == null) "Add search engine" else "Replace custom search engine",
+            icon = R.drawable.ic_add,
+            tile = R.color.tile_blue,
+            accent = true,
+            chevron = true
+        ) { push(addSearchEnginePage(custom)) }))
         addView(KernelUi.footer(context, "Used for anything you type in the address bar that isn't a web address."))
+    }
+
+    private fun addSearchEnginePage(existing: SearchEngine?) = Page("Add search engine") {
+        val name = ChromeSheet.textField(context, "Name", existing?.displayName)
+        val url = ChromeSheet.textField(context, "https://example.com/search?q=%s", existing?.searchUrl).apply {
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI
+        }
+        val error = KernelUi.footer(context, "").apply {
+            setTextColor(context.getColor(R.color.kernel_danger))
+            visibility = View.GONE
+        }
+        fun save() {
+            when (val result = CustomSearchEngines.validate(name.text.toString(), url.text.toString())) {
+                is CustomSearchEngines.Result.Invalid -> {
+                    error.text = result.message
+                    error.visibility = View.VISIBLE
+                }
+                is CustomSearchEngines.Result.Valid -> {
+                    browserPreferences.saveCustomSearchEngine(result.engine)
+                    onPreferencesChanged()
+                    toast("${result.engine.displayName} is now your search engine")
+                    pop()
+                }
+            }
+        }
+        url.imeOptions = EditorInfo.IME_ACTION_DONE
+        url.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_DONE) { save(); true } else false
+        }
+        addView(KernelUi.sectionHeader(context, "Search engine"))
+        addView(name)
+        addView(url)
+        addView(error)
+        addView(View(context), LinearLayout.LayoutParams(1, KernelUi.dp(context, 8)))
+        addView(ChromeSheet.actionButton(context, "Save", primary = true) { save() })
+        addView(KernelUi.footer(context, "Search for something on the site, copy the results page address, and replace " +
+            "your search words with %s. For example: https://en.wikipedia.org/w/index.php?search=%s"))
+    }
+
+    private fun websiteThemePage() = Page("Website theme") {
+        addView(KernelUi.sectionHeader(context, "Appearance of websites"))
+        addView(KernelUi.group(context, WebsiteTheme.entries.map { theme ->
+            KernelUi.choice(context, title = theme.displayName, subtitle = theme.summary, selected = browserPreferences.websiteTheme == theme) {
+                browserPreferences.websiteTheme = theme
+                onPreferencesChanged()
+                refresh()
+            }
+        }))
+        addView(KernelUi.footer(context, "Only affects sites that offer both light and dark designs."))
+    }
+
+    private fun defaultBrowserRow(): View {
+        val isDefault = DefaultBrowser.isDefault(context)
+        return KernelUi.item(
+            context,
+            if (isDefault) "Kernel is your default browser" else "Set as default browser",
+            subtitle = if (isDefault) "Links from other apps open here." else "Open links from other apps in Kernel.",
+            icon = R.drawable.ic_globe,
+            tile = R.color.tile_blue,
+            accent = !isDefault,
+            chevron = true
+        ) {
+            val activity = context as? Activity ?: return@item
+            awaitingDefaultBrowser = true
+            val opened = if (isDefault) DefaultBrowser.openDefaultAppsSettings(activity) else DefaultBrowser.request(activity)
+            if (!opened) {
+                awaitingDefaultBrowser = false
+                toast("Open your device's Default apps settings to choose a browser")
+            }
+        }
     }
 
     private fun homepagePage() = Page("Homepage") {
@@ -375,6 +502,47 @@ class SettingsDialogController(
 
     // region privacy pages
 
+    private fun trackingLevelLabel(): String = when {
+        !browserPreferences.trackingProtection -> "Off"
+        browserPreferences.strictTrackingProtection -> "Strict"
+        else -> "Standard"
+    }
+
+    private fun trackingProtectionPage() = Page("Tracking protection") {
+        fun select(enabled: Boolean, strict: Boolean) {
+            browserPreferences.trackingProtection = enabled
+            browserPreferences.strictTrackingProtection = strict
+            onPreferencesChanged()
+            refresh()
+        }
+        val level = trackingLevelLabel()
+        addView(KernelUi.sectionHeader(context, "Enhanced Tracking Protection"))
+        addView(KernelUi.group(
+            context,
+            KernelUi.choice(context, "Standard", subtitle = "Blocks social trackers, cross-site cookies, cryptominers, " +
+                "and fingerprinters. Pages load normally.", selected = level == "Standard") { select(enabled = true, strict = false) },
+            KernelUi.choice(context, "Strict", subtitle = "Also blocks tracking content such as embedded ads and videos. " +
+                "Stronger protection, but some sites may break.", selected = level == "Strict") { select(enabled = true, strict = true) },
+            KernelUi.choice(context, "Off", subtitle = "Trackers are not blocked.", selected = level == "Off") {
+                select(enabled = false, strict = false)
+            }
+        ))
+        addView(KernelUi.footer(context, "If a site doesn't work right, try Standard. Private tabs always isolate cross-site cookies."))
+    }
+
+    private fun httpsOnlyPage() = Page("HTTPS-Only Mode") {
+        addView(KernelUi.sectionHeader(context, "Always use secure connections"))
+        addView(KernelUi.group(context, HttpsOnlyMode.entries.map { mode ->
+            KernelUi.choice(context, title = mode.displayName, subtitle = mode.summary, selected = browserPreferences.httpsOnly == mode) {
+                browserPreferences.httpsOnly = mode
+                onPreferencesChanged()
+                refresh()
+            }
+        }))
+        addView(KernelUi.footer(context, "HTTPS keeps what you send and see private from others on the network. " +
+            "Most sites support it; a few older ones only work over HTTP."))
+    }
+
     private fun passwordsPage() = Page("Passwords") {
         addView(KernelUi.group(context, KernelUi.toggle(
             context,
@@ -421,24 +589,48 @@ class SettingsDialogController(
             saved.groupBy { displayHost(it.uri) }.toSortedMap().forEach { (host, entries) ->
                 container.addView(KernelUi.sectionHeader(context, host))
                 container.addView(KernelUi.group(context, entries.map { permission ->
+                    val label = SitePermissions.label(permission.permission)
                     KernelUi.item(
                         context,
-                        title = SitePermissions.label(permission.permission),
+                        title = label,
+                        subtitle = if (permission.privateMode) "Private tabs" else null,
                         value = SitePermissions.valueLabel(permission.value),
                         trailing = KernelUi.pill(context, "Reset", R.color.kernel_danger).apply {
-                            contentDescription = "Reset ${SitePermissions.label(permission.permission)} for $host"
+                            contentDescription = "Reset $label for $host"
                             setOnClickListener {
                                 runtime.storageController.setPermission(permission, GeckoSession.PermissionDelegate.ContentPermission.VALUE_PROMPT)
                                 container.postDelayed({ refresh() }, 200)
                             }
                         }
-                    )
+                    ) {
+                        choosePermissionValue(host, label, permission.value) { value ->
+                            runtime.storageController.setPermission(permission, value)
+                            container.postDelayed({ refresh() }, 200)
+                        }
+                    }
                 }))
             }
+            container.addView(KernelUi.footer(context, "Tap a permission to allow or block it. Reset asks again next time."))
         }, {
             container.removeAllViews()
             container.addView(KernelUi.footer(context, "Could not load site permissions."))
         })
+    }
+
+    private fun choosePermissionValue(host: String, label: String, current: Int, onChoose: (Int) -> Unit) {
+        val values = listOf(
+            GeckoSession.PermissionDelegate.ContentPermission.VALUE_ALLOW,
+            GeckoSession.PermissionDelegate.ContentPermission.VALUE_DENY,
+            GeckoSession.PermissionDelegate.ContentPermission.VALUE_PROMPT
+        )
+        ChromeSheet.show(context, title = label, subtitle = host, compactTitle = true) { sheet ->
+            addView(KernelUi.group(context, values.map { value ->
+                KernelUi.choice(context, title = SitePermissions.valueLabel(value), selected = value == current) {
+                    sheet.dismiss()
+                    if (value != current) onChoose(value)
+                }
+            }))
+        }
     }
 
     private fun clearDataPage() = Page("Clear browsing data") {
@@ -473,6 +665,26 @@ class SettingsDialogController(
                 clearStorage(StorageController.ClearFlags.ALL, "All browsing data cleared")
             }
         }))
+
+        addView(KernelUi.sectionHeader(context, "When you quit"))
+        val quitRows = mutableListOf<View>(
+            KernelUi.toggle(context, "Delete browsing data on quit",
+                subtitle = "Clears history, open tabs, cookies, and cache whenever Kernel quits.",
+                icon = R.drawable.ic_delete, tile = R.color.tile_gray, checked = browserPreferences.clearDataOnQuit) {
+                browserPreferences.clearDataOnQuit = it
+                host.post { refresh() }
+            }
+        )
+        if (browserPreferences.clearDataOnQuit) {
+            quitRows += KernelUi.item(context, "Quit Kernel", subtitle = "Close all tabs and delete browsing data now.",
+                icon = R.drawable.ic_close, tile = R.color.tile_red, danger = true) {
+                val activity = context as? Activity ?: return@item
+                dialog.dismiss()
+                activity.finishAndRemoveTask()
+            }
+        }
+        addView(KernelUi.group(context, quitRows))
+        addView(KernelUi.footer(context, "Bookmarks, site permissions, and saved passwords are kept."))
     }
 
     private fun clearStorage(flags: Long, done: String) {
@@ -498,52 +710,180 @@ class SettingsDialogController(
         }
     }
 
-    private fun historyPage() = Page("History") {
-        val entries = historyProvider()
-        if (entries.isEmpty()) {
-            addView(KernelUi.sectionHeader(context, "Recent"))
-            addView(KernelUi.group(context, KernelUi.item(context, "No history yet", subtitle = "Pages from normal tabs appear here. Private tabs are never saved.")))
-            return@Page
-        }
-        addView(KernelUi.sectionHeader(context, "Recent"))
-        addView(KernelUi.group(context, entries.take(60).map { (title, url) ->
-            KernelUi.item(context, title, subtitle = displayHost(url), icon = R.drawable.ic_globe, tile = R.color.tile_gray) {
-                dialog.dismiss()
-                openUrl(url)
+    private fun historyPage(): Page {
+        // Survives re-renders (for example after Clear history) so the search box keeps its text.
+        var query = ""
+        return Page("History") {
+            if (historyStore.timedEntries().isEmpty()) {
+                addView(KernelUi.sectionHeader(context, "Recent"))
+                addView(KernelUi.group(context, KernelUi.item(context, "No history yet",
+                    subtitle = "Pages from normal tabs appear here. Private tabs are never saved.")))
+                return@Page
             }
-        }))
-        addView(KernelUi.sectionHeader(context, ""))
-        addView(KernelUi.group(context, KernelUi.item(context, "Clear history", danger = true) {
-            confirm("Clear history?", "Removes all pages listed here.", "Clear") {
-                clearHistory()
-                refresh()
+            val results = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+            fun renderResults() {
+                results.removeAllViews()
+                val matches = HistoryGrouping.filterEntries(historyStore.timedEntries(), query)
+                if (matches.isEmpty()) {
+                    results.addView(KernelUi.footer(context,
+                        if (query.isBlank()) "No history yet." else "No pages match “${query.trim()}”."))
+                    return
+                }
+                HistoryGrouping.group(matches, System.currentTimeMillis()).forEach { section ->
+                    results.addView(KernelUi.sectionHeader(context, section.label))
+                    results.addView(KernelUi.group(context, section.entries.map { entry ->
+                        KernelUi.item(
+                            context,
+                            entry.title,
+                            subtitle = listOfNotNull(timeLabel(entry.visitedAt), displayHost(entry.url)).joinToString(" · "),
+                            leading = KernelUi.letterTile(context, displayHost(entry.url), entry.url),
+                            trailing = removeButton("Remove ${entry.title} from history") {
+                                historyStore.remove(entry.url)
+                                renderResults()
+                            }
+                        ) {
+                            dialog.dismiss()
+                            openUrl(entry.url)
+                        }
+                    }))
+                }
             }
-        }))
-    }
-
-    private fun bookmarksPage() = Page("Bookmarks") {
-        val bookmarks = bookmarksStore.entries()
-        addView(KernelUi.sectionHeader(context, "Saved pages"))
-        if (bookmarks.isEmpty()) {
-            addView(KernelUi.group(context, KernelUi.item(context, "No bookmarks yet", subtitle = "Use Add bookmark in the browser menu.")))
-            return@Page
-        }
-        addView(KernelUi.group(context, bookmarks.map { (title, url) ->
-            KernelUi.item(
-                context,
-                title,
-                subtitle = displayHost(url),
-                icon = R.drawable.ic_bookmark,
-                tile = R.color.tile_orange,
-                trailing = removeButton("Remove $title") {
-                    bookmarksStore.remove(url)
+            addView(searchField("Search history", query) {
+                query = it
+                renderResults()
+            })
+            addView(results)
+            renderResults()
+            addView(KernelUi.sectionHeader(context, ""))
+            addView(KernelUi.group(context, KernelUi.item(context, "Clear history", danger = true) {
+                confirm("Clear history?", "Removes all pages listed here.", "Clear") {
+                    clearHistory()
+                    query = ""
                     refresh()
                 }
-            ) {
-                dialog.dismiss()
-                openUrl(url)
+            }))
+        }
+    }
+
+    private fun bookmarksPage(): Page {
+        var query = ""
+        return Page("Bookmarks") {
+            if (bookmarksStore.entries().isEmpty()) {
+                addView(KernelUi.sectionHeader(context, "Saved pages"))
+                addView(KernelUi.group(context, KernelUi.item(context, "No bookmarks yet", subtitle = "Use Add bookmark in the browser menu.")))
+                return@Page
             }
-        }))
+            val results = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+            fun renderResults() {
+                results.removeAllViews()
+                val matches = HistoryGrouping.filter(bookmarksStore.entries(), query, { it.first }, { it.second })
+                results.addView(KernelUi.sectionHeader(context, "Saved pages"))
+                if (matches.isEmpty()) {
+                    results.addView(KernelUi.footer(context,
+                        if (query.isBlank()) "No bookmarks yet." else "No bookmarks match “${query.trim()}”."))
+                    return
+                }
+                results.addView(KernelUi.group(context, matches.map { (title, url) ->
+                    KernelUi.item(
+                        context,
+                        title,
+                        subtitle = displayHost(url),
+                        icon = R.drawable.ic_bookmark,
+                        tile = R.color.tile_orange,
+                        trailing = KernelUi.moreButton(context, "More options for $title") {
+                            showBookmarkActions(title, url) { renderResults() }
+                        }
+                    ) {
+                        dialog.dismiss()
+                        openUrl(url)
+                    }
+                }))
+            }
+            addView(searchField("Search bookmarks", query) {
+                query = it
+                renderResults()
+            })
+            addView(results)
+            renderResults()
+        }
+    }
+
+    private fun showBookmarkActions(title: String, url: String, onChanged: () -> Unit) {
+        ChromeSheet.show(context, title = title, subtitle = url, compactTitle = true) { sheet ->
+            addView(KernelUi.group(
+                context,
+                KernelUi.item(context, "Open", icon = R.drawable.ic_globe, tile = R.color.tile_blue) {
+                    sheet.dismiss()
+                    dialog.dismiss()
+                    openUrl(url)
+                },
+                KernelUi.item(context, "Edit name", icon = R.drawable.ic_bookmark, tile = R.color.tile_orange) {
+                    sheet.dismiss()
+                    editBookmarkTitle(title, url, onChanged)
+                },
+                KernelUi.item(context, "Remove", icon = R.drawable.ic_delete, tile = R.color.tile_red, danger = true) {
+                    sheet.dismiss()
+                    bookmarksStore.remove(url)
+                    toast("Bookmark removed")
+                    onChanged()
+                }
+            ))
+        }
+    }
+
+    private fun editBookmarkTitle(title: String, url: String, onChanged: () -> Unit) {
+        ChromeSheet.show(context, title = "Edit bookmark", subtitle = url, scrollable = false, showDone = false, compactTitle = true) { sheet ->
+            val input = ChromeSheet.textField(context, "Name", title)
+            fun save() {
+                sheet.dismiss()
+                bookmarksStore.rename(url, input.text.toString())
+                onChanged()
+            }
+            input.imeOptions = EditorInfo.IME_ACTION_DONE
+            input.setOnEditorActionListener { _, actionId, _ ->
+                if (actionId == EditorInfo.IME_ACTION_DONE) { save(); true } else false
+            }
+            addView(input)
+            addView(ChromeSheet.buttonRow(
+                context,
+                ChromeSheet.actionButton(context, "Cancel") { sheet.dismiss() },
+                ChromeSheet.actionButton(context, "Save", primary = true) { save() }
+            ))
+            input.requestFocus()
+            input.setSelection(input.text.length)
+            sheet.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE)
+        }
+    }
+
+    /** A rounded search box; [onChange] runs on every edit without rebuilding the page. */
+    private fun searchField(hint: String, initial: String, onChange: (String) -> Unit): EditText {
+        return ChromeSheet.textField(context, hint, initial).apply {
+            imeOptions = EditorInfo.IME_ACTION_SEARCH
+            inputType = android.text.InputType.TYPE_CLASS_TEXT
+            contentDescription = hint
+            (layoutParams as? LinearLayout.LayoutParams)?.topMargin = KernelUi.dp(context, 8)
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+                override fun afterTextChanged(s: Editable?) {
+                    onChange(s?.toString().orEmpty())
+                }
+            })
+            setOnEditorActionListener { view, actionId, _ ->
+                if (actionId == EditorInfo.IME_ACTION_SEARCH) {
+                    (context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
+                        .hideSoftInputFromWindow(view.windowToken, 0)
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    private fun timeLabel(visitedAt: Long): String? {
+        if (visitedAt <= 0L) return null
+        return android.text.format.DateFormat.getTimeFormat(context).format(java.util.Date(visitedAt))
     }
 
     private fun downloadsPage() = Page("Downloads") {

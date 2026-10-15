@@ -43,7 +43,8 @@ object StartPage {
     }
 
     /** The URL to show/store for a tab: empty while the start page is showing. */
-    fun displayUrl(url: String?): String = if (isStartPageUrl(url)) "" else url.orEmpty()
+    fun displayUrl(url: String?): String =
+        if (isStartPageUrl(url) || url.equals("about:blank", ignoreCase = true)) "" else url.orEmpty()
 
     /** Most-visited hosts from (most-recent-first) history, deduped by host, http/https only. */
     fun topSites(history: List<Pair<String, String>>, max: Int = MAX_TOP_SITES): List<Site> {
@@ -81,7 +82,7 @@ object StartPage {
                 "style-src 'unsafe-inline'; img-src https: http:; form-action https: http:\">"
         )
         sb.append("<meta name=\"referrer\" content=\"no-referrer\">")
-        sb.append("<meta name=\"color-scheme\" content=\"dark\">")
+        sb.append("<meta name=\"color-scheme\" content=\"light dark\">")
         sb.append("<title>").append(TITLE).append("</title>")
         sb.append("<style>").append(CSS).append("</style></head><body><main>")
 
@@ -228,33 +229,35 @@ object StartPage {
     private fun colorFor(key: String): String = PALETTE[(key.hashCode() and 0x7fffffff) % PALETTE.size]
 
     private val CSS = """
+        :root{--bg:#F1F3F4;--text:#1F1F1F;--surface:#FFFFFF;--border:#DADCE0;--divider:#E8EAED;--accent:#0B57D0;--on-accent:#FFFFFF;--heading:#5F6368;--muted:#5F6368;--placeholder:#80868B}
+        @media (prefers-color-scheme:dark){:root{--bg:#202124;--text:#F2F3F5;--surface:#2C2D31;--border:#3A3C41;--divider:#36383D;--accent:#7AB7FF;--on-accent:#0B1B2E;--heading:#C0C3CA;--muted:#9AA0A8;--placeholder:#9AA0A8}}
         *{box-sizing:border-box}
-        html,body{margin:0;background:#202124;color:#F2F3F5;font-family:system-ui,-apple-system,"Roboto",sans-serif;-webkit-text-size-adjust:100%}
+        html,body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Roboto",sans-serif;-webkit-text-size-adjust:100%}
         main{max-width:640px;margin:0 auto;padding:calc(40px + env(safe-area-inset-top)) 16px 140px}
-        .brand{margin:8px 0 20px;text-align:center;font-size:30px;font-weight:700;letter-spacing:-.5px;color:#F2F3F5}
-        .search{display:flex;align-items:center;background:#2C2D31;border:1px solid #3A3C41;border-radius:26px;padding:4px 4px 4px 18px;margin-bottom:28px}
-        .search:focus-within{border-color:#7AB7FF}
-        .q{flex:1;min-width:0;background:transparent;border:0;outline:0;color:#F2F3F5;font:inherit;font-size:17px;padding:12px 0}
-        .q::placeholder{color:#9AA0A8}
-        .search button{border:0;border-radius:22px;background:#7AB7FF;color:#0B1B2E;font:inherit;font-weight:600;font-size:15px;padding:10px 18px;margin-left:8px}
-        h2{font-size:15px;font-weight:600;color:#C0C3CA;margin:0 4px 12px;text-transform:none}
+        .brand{margin:8px 0 20px;text-align:center;font-size:30px;font-weight:700;letter-spacing:-.5px;color:var(--text)}
+        .search{display:flex;align-items:center;background:var(--surface);border:1px solid var(--border);border-radius:26px;padding:4px 4px 4px 18px;margin-bottom:28px}
+        .search:focus-within{border-color:var(--accent)}
+        .q{flex:1;min-width:0;background:transparent;border:0;outline:0;color:var(--text);font:inherit;font-size:17px;padding:12px 0}
+        .q::placeholder{color:var(--placeholder)}
+        .search button{border:0;border-radius:22px;background:var(--accent);color:var(--on-accent);font:inherit;font-weight:600;font-size:15px;padding:10px 18px;margin-left:8px}
+        h2{font-size:15px;font-weight:600;color:var(--heading);margin:0 4px 12px;text-transform:none}
         section{margin-bottom:28px}
-        .grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px 8px;background:#2C2D31;border-radius:20px;padding:16px 8px}
-        .tile{display:flex;flex-direction:column;align-items:center;text-decoration:none;color:#F2F3F5;min-width:0}
+        .grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px 8px;background:var(--surface);border-radius:20px;padding:16px 8px}
+        .tile{display:flex;flex-direction:column;align-items:center;text-decoration:none;color:var(--text);min-width:0}
         .icon{position:relative;display:flex;align-items:center;justify-content:center;width:52px;height:52px;border-radius:50%;color:#fff;font-weight:700;font-size:21px;overflow:hidden;flex:none}
         .icon .fav{position:absolute;left:12px;top:12px;width:28px;height:28px;background-size:contain;background-repeat:no-repeat;background-position:center}
         .icon.small{width:36px;height:36px;font-size:16px}
         .label{margin-top:8px;font-size:13px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-        .list{list-style:none;margin:0;padding:4px 0;background:#2C2D31;border-radius:20px}
-        .list a{display:flex;align-items:center;gap:14px;padding:10px 16px;text-decoration:none;color:#F2F3F5;min-width:0}
-        .list li+li a{border-top:1px solid #36383D}
+        .list{list-style:none;margin:0;padding:4px 0;background:var(--surface);border-radius:20px}
+        .list a{display:flex;align-items:center;gap:14px;padding:10px 16px;text-decoration:none;color:var(--text);min-width:0}
+        .list li+li a{border-top:1px solid var(--divider)}
         .text{display:flex;flex-direction:column;min-width:0}
         .title,.url{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
         .title{font-size:16px}
-        .url{font-size:13px;color:#9AA0A8;margin-top:2px}
-        .empty{margin:0;padding:18px 16px;background:#2C2D31;border-radius:20px;color:#9AA0A8;font-size:14px}
+        .url{font-size:13px;color:var(--muted);margin-top:2px}
+        .empty{margin:0;padding:18px 16px;background:var(--surface);border-radius:20px;color:var(--muted);font-size:14px}
         a:active{opacity:.7}
-        a:focus-visible{outline:2px solid #7AB7FF;outline-offset:2px;border-radius:12px}
+        a:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:12px}
         @media (orientation:landscape) and (max-height:500px){main{padding-top:calc(16px + env(safe-area-inset-top))}.brand{display:none}.search{margin-bottom:18px}.grid{grid-template-columns:repeat(8,minmax(0,1fr))}}
         @media (min-width:600px){.grid{grid-template-columns:repeat(8,minmax(0,1fr))}}
     """.trimIndent().replace("\n", "")
