@@ -62,11 +62,12 @@ class TabMemoryPolicyTest {
 
     @Test
     fun `portrait capture keeps the top of the page at a capped width`() {
+        // 540 asked for, but THUMBNAIL_MAX_WIDTH_PX (480) caps it.
         val size = TabMemoryPolicy.thumbnailSize(1080, 2200, 540)!!
 
-        assertEquals(540, size.width)
+        assertEquals(480, size.width)
         assertEquals(1188, size.sourceHeight)
-        assertEquals(594, size.height)
+        assertEquals(528, size.height)
     }
 
     @Test
