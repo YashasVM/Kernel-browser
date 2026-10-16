@@ -367,7 +367,13 @@ class MainActivity : Activity() {
         }
         window.statusBarColor = getColor(R.color.kernel_background)
         window.navigationBarColor = getColor(R.color.kernel_background)
-        window.decorView.systemUiVisibility = 0
+        val night = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
+        @Suppress("DEPRECATION")
+        window.decorView.systemUiVisibility = if (night) {
+            0
+        } else {
+            View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+        }
     }
 
     private fun configureInsets() {

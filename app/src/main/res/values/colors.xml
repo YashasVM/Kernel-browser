@@ -1,22 +1,29 @@
 <resources>
-    <color name="kernel_background">#202124</color>
-    <color name="kernel_surface">#2A2B2F</color>
-    <color name="kernel_surface_alt">#34363A</color>
-    <color name="kernel_surface_elevated">#242529</color>
-    <color name="kernel_chrome">#CC25262A</color>
-    <color name="kernel_address_surface">#D934363B</color>
-    <color name="kernel_text">#F2F3F5</color>
-    <color name="kernel_muted">#C0C3CA</color>
-    <color name="kernel_border">#4A4D54</color>
-    <color name="kernel_accent">#7AB7FF</color>
-    <color name="kernel_tab_accent">#FF725C</color>
+    <!--
+        Design tokens. Light values live here; values-night/colors.xml overrides them for dark
+        mode so the whole UI follows the system theme like Chrome and Firefox. Always reference
+        these tokens instead of hard-coded colors.
+    -->
+    <color name="kernel_background">#F4F4F7</color>
+    <color name="kernel_surface">#FFFFFF</color>
+    <color name="kernel_surface_alt">#ECEDF1</color>
+    <color name="kernel_surface_elevated">#FFFFFF</color>
+    <color name="kernel_chrome">#FAFAFC</color>
+    <color name="kernel_address_surface">#ECEDF1</color>
+    <color name="kernel_text">#1B1C1F</color>
+    <color name="kernel_muted">#5F6368</color>
+    <color name="kernel_border">#D7D9DE</color>
+    <color name="kernel_accent">#0B57D0</color>
+    <color name="kernel_tab_accent">#E5533D</color>
     <color name="kernel_logo_background">#050506</color>
-    <color name="kernel_danger">#FF6B7A</color>
-    <color name="kernel_disabled">#70747C</color>
-    <color name="kernel_scrim">#99000000</color>
-    <color name="kernel_on_accent">#0B1B33</color>
-    <color name="kernel_divider">#3F4247</color>
-    <color name="kernel_group">#2C2D31</color>
+    <color name="kernel_danger">#C5221F</color>
+    <color name="kernel_disabled">#A3A7AE</color>
+    <color name="kernel_scrim">#66000000</color>
+    <color name="kernel_on_accent">#FFFFFF</color>
+    <color name="kernel_divider">#E4E5EA</color>
+    <color name="kernel_group">#FFFFFF</color>
+    <color name="kernel_pressed">#1F1B1C1F</color>
+    <color name="kernel_private">#6B4FBB</color>
     <color name="tile_blue">#3B82F6</color>
     <color name="tile_green">#22A55A</color>
     <color name="tile_orange">#F08A24</color>
