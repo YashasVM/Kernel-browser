@@ -76,6 +76,7 @@ class MainActivity : Activity() {
     private lateinit var sessionStore: SessionStore
     private lateinit var browserPreferences: BrowserPreferences
     private val tabThumbnails = mutableMapOf<Long, Bitmap>()
+    private val thumbnailCaptures = ThumbnailCaptureGuard<GeckoSession>()
     private var bottomInset = 0
     private var chromeHidden = false
     private var addressBarEditing = false
@@ -190,6 +191,7 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        thumbnailCaptures.clear()
         chromeHandler.removeCallbacksAndMessages(null)
         if (isFinishing) {
             saveNormalSession()
@@ -236,39 +238,43 @@ class MainActivity : Activity() {
     }
 
     private fun restoreTabsOrCreateHome(intent: Intent?) {
-        if (openIntentUri(intent)) return
-
-        val restoredTabs = sessionStore.restore().ifEmpty {
-            listOf(SessionStore.Entry("Home", StartPage.SESSION_URL, ""))
-        }
-        restoredTabs.forEachIndexed { index, entry ->
-            val tab = tabs.create(TabMode.NORMAL)
-            tab.title = entry.title
-            tab.url = entry.url.takeUnless { it == StartPage.SESSION_URL }.orEmpty()
-            if (index == restoredTabs.lastIndex) {
-                attachTab(tab)
-            }
-            if (entry.state.isNotBlank()) {
-                runCatching {
-                    tab.sessionState = entry.state
-                    val state = GeckoSession.SessionState.fromString(entry.state)
-                        ?: error("Invalid session state")
-                    tab.session.restoreState(state)
-                }.getOrElse {
+        val hasIncomingLink = incomingIntentUri(intent) != null
+        SessionStartup.restore(
+            savedTabs = sessionStore.restore(),
+            hasIncomingLink = hasIncomingLink,
+            home = { SessionStore.Entry("Home", StartPage.SESSION_URL, "") },
+            restoreTab = { entry, select ->
+                val tab = tabs.create(TabMode.NORMAL)
+                tab.title = entry.title
+                tab.url = entry.url.takeUnless { it == StartPage.SESSION_URL }.orEmpty()
+                if (select) {
+                    attachTab(tab)
+                }
+                if (entry.state.isNotBlank()) {
+                    runCatching {
+                        tab.sessionState = entry.state
+                        val state = GeckoSession.SessionState.fromString(entry.state)
+                            ?: error("Invalid session state")
+                        tab.session.restoreState(state)
+                    }.getOrElse {
+                        tab.session.loadUri(entry.url.ifBlank { browserPreferences.homepageUrl })
+                    }
+                } else if (entry.url == StartPage.SESSION_URL) {
+                    openHome(tab)
+                } else {
                     tab.session.loadUri(entry.url.ifBlank { browserPreferences.homepageUrl })
                 }
-            } else if (entry.url == StartPage.SESSION_URL) {
-                openHome(tab)
-            } else {
-                tab.session.loadUri(entry.url.ifBlank { browserPreferences.homepageUrl })
-            }
-        }
+            },
+            openIncomingLink = { openIntentUri(intent) }
+        )
+    }
+
+    private fun incomingIntentUri(intent: Intent?): String? = intent?.dataString?.takeIf {
+        intent.action == Intent.ACTION_VIEW && (it.startsWith("http://") || it.startsWith("https://"))
     }
 
     private fun openIntentUri(intent: Intent?): Boolean {
-        val uri = intent?.dataString?.takeIf {
-            intent.action == Intent.ACTION_VIEW && (it.startsWith("http://") || it.startsWith("https://"))
-        } ?: return false
+        val uri = incomingIntentUri(intent) ?: return false
 
         val tab = tabs.create(TabMode.NORMAL)
         attachTab(tab)
@@ -449,7 +455,8 @@ class MainActivity : Activity() {
             override fun onCloseRequest(session: GeckoSession) {
                 if (fullScreenSession == session) onFullScreenChanged(session, false)
                 rememberClosedTab(tab)
-                tabThumbnails.remove(tab.id)?.recycle()
+                thumbnailCaptures.invalidate(tab.id)
+                tabThumbnails.remove(tab.id)
                 tabs.close(tab.id)
                 attachCurrentOrCreate()
                 saveNormalSession()
@@ -629,6 +636,7 @@ class MainActivity : Activity() {
                 hasUserGesture: Boolean
             ) {
                 if (session != tab.session) return
+                thumbnailCaptures.invalidate(tab.id)
                 tab.url = StartPage.displayUrl(url)
                 if (!binding.addressBar.hasFocus()) {
                     binding.addressBar.setText(tab.url)
@@ -675,6 +683,7 @@ class MainActivity : Activity() {
                 if (session != tab.session) return
                 if (tab == tabs.activeTab) markExtensionActiveTab(session)
                 tab.isLoading = true
+                thumbnailCaptures.invalidate(tab.id)
                 tab.url = StartPage.displayUrl(url)
                 setChromeVisible(true)
                 updateUi()
@@ -1306,6 +1315,7 @@ class MainActivity : Activity() {
     private fun closeTabs(mode: TabMode) {
         tabs.all().filter { it.mode == mode }.forEach { tab ->
             rememberClosedTab(tab)
+            thumbnailCaptures.invalidate(tab.id)
             tabThumbnails.remove(tab.id)
             tabs.close(tab.id)
         }
@@ -1934,6 +1944,7 @@ class MainActivity : Activity() {
             },
             closeTab = { tab ->
                 rememberClosedTab(tab)
+                thumbnailCaptures.invalidate(tab.id)
                 tabThumbnails.remove(tab.id)
                 tabs.close(tab.id)
                 attachCurrentOrCreate()
@@ -1948,6 +1959,7 @@ class MainActivity : Activity() {
     private fun resetBrowserState() {
         sessionStore.clear()
         tabs.all().map { it.id }.forEach {
+            thumbnailCaptures.invalidate(it)
             tabThumbnails.remove(it)
             tabs.close(it)
         }
@@ -1983,7 +1995,10 @@ class MainActivity : Activity() {
     }
 
     private fun attachTab(tab: BrowserTab) {
-        tabs.activeTab?.let { active ->
+        // create() may already have selected the next tab while GeckoView still shows the old one.
+        tabs.all().firstOrNull { it.session === binding.geckoView.session }?.let { active ->
+            // A capture completing after setSession below is deliberately discarded: an older
+            // preview is preferable to attributing private pixels to a newly selected tab.
             captureThumbnail(active)
             fullScreenSession?.takeIf { it == active.session && active != tab }?.exitFullScreen()
         }
@@ -2020,17 +2035,23 @@ class MainActivity : Activity() {
     }
 
     private fun captureThumbnail(tab: BrowserTab) {
-        if (tab.session != tabs.activeTab?.session || binding.geckoView.width <= 0 || binding.geckoView.height <= 0) return
+        if (isFinishing || isDestroyed || binding.geckoView.width <= 0 || binding.geckoView.height <= 0) return
+        val ticket = thumbnailCaptures.begin(tab.id, tab.session, binding.geckoView.session) ?: return
         binding.geckoView.capturePixels().accept({ bitmap ->
+            val liveSession = tabs.all().firstOrNull { it.id == tab.id }?.session
+            val owned = thumbnailCaptures.complete(ticket, liveSession, binding.geckoView.session)
             val source = bitmap ?: return@accept
+            if (!owned || isFinishing || isDestroyed) {
+                source.recycle()
+                return@accept
+            }
             val targetSize = ChromeSheet.dp(this, 240).coerceAtLeast(1)
             val scaled = Bitmap.createScaledBitmap(source, targetSize, targetSize, true)
-            tabThumbnails.remove(tab.id)?.recycle()
+            // The switcher can still draw the previous bitmap. Drop our reference, never recycle it.
             tabThumbnails[tab.id] = scaled
-            if (source !== scaled) {
-                source.recycle()
-            }
+            if (source !== scaled) source.recycle()
         }, {
+            thumbnailCaptures.complete(ticket, null, null)
             // Thumbnails are best-effort; browsing should never wait on capture.
         })
     }
@@ -2082,3 +2103,4 @@ class MainActivity : Activity() {
         const val SUGGESTION_DEBOUNCE_MS = 150L
     }
 }
+
