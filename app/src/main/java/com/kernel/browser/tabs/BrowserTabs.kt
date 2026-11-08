@@ -11,6 +11,7 @@ class BrowserTabs(
     private val deck = TabDeck()
     private val tabs = linkedMapOf<Long, BrowserTab>()
     private var nextId = 1L
+    private var useCounter = 0L
 
     var activeTab: BrowserTab? = null
         private set
@@ -20,6 +21,7 @@ class BrowserTabs(
             .usePrivateMode(mode == TabMode.PRIVATE)
             .build()
         val tab = BrowserTab(nextId++, GeckoSession(settings), mode)
+        tab.lastUsed = ++useCounter
         tabs[tab.id] = tab
         deck.add(TabRecord(tab.id, mode))
         configureSession(tab)
@@ -31,7 +33,10 @@ class BrowserTabs(
     }
 
     fun select(id: Long): BrowserTab? {
-        return tabs[id]?.also { activeTab = it }
+        return tabs[id]?.also {
+            it.lastUsed = ++useCounter
+            activeTab = it
+        }
     }
 
     fun close(id: Long): BrowserTab? {

@@ -1,0 +1,4 @@
+<resources>
+    <!-- Dark framework base so ripples, switches, and system dialogs match the dark palette. -->
+    <style name="Base.AppTheme" parent="@android:style/Theme.Material.NoActionBar" />
+</resources>

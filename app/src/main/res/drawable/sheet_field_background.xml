@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Text fields in sheets: same shape as sheet rows, accent outline while focused. -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_focused="true">
+        <shape>
+            <solid android:color="@color/kernel_surface_alt" />
+            <stroke
+                android:width="2dp"
+                android:color="@color/kernel_accent" />
+            <corners android:radius="18dp" />
+        </shape>
+    </item>
+    <item>
+        <shape>
+            <solid android:color="@color/kernel_surface_alt" />
+            <corners android:radius="18dp" />
+        </shape>
+    </item>
+</selector>

@@ -2,9 +2,9 @@ plugins {
     id("com.android.application")
 }
 
-val appVersionCode = 13
-val appVersionName = "1.11"
-val uiBuildTag = "v1.11-extensions-settings-2026-10-14"
+val appVersionCode = 14
+val appVersionName = "1.12"
+val uiBuildTag = "v1.12-production-pass-2026-10-15"
 
 android {
     namespace = "com.kernel.browser"

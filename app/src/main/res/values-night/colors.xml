@@ -1,0 +1,32 @@
+<resources>
+    <!-- Dark palette: overrides every theme-dependent color in values/colors.xml. -->
+    <color name="kernel_background">#202124</color>
+    <color name="kernel_surface">#2A2B2F</color>
+    <color name="kernel_surface_alt">#34363A</color>
+    <color name="kernel_surface_elevated">#242529</color>
+    <color name="kernel_chrome">#FF25262A</color>
+    <color name="kernel_address_surface">#FF34363B</color>
+    <color name="kernel_text">#F2F3F5</color>
+    <color name="kernel_muted">#C0C3CA</color>
+    <color name="kernel_border">#4A4D54</color>
+    <color name="kernel_accent">#7AB7FF</color>
+    <color name="kernel_tab_accent">#FF725C</color>
+    <color name="kernel_danger">#FF6B7A</color>
+    <color name="kernel_disabled">#70747C</color>
+    <color name="kernel_scrim">#99000000</color>
+    <color name="kernel_on_accent">#0B1B33</color>
+    <color name="kernel_private_surface">#FF3A3156</color>
+    <color name="kernel_private_border">#FF6B5BB5</color>
+    <color name="kernel_private_accent">#B9A6FF</color>
+    <color name="kernel_on_private_accent">#1B1236</color>
+    <color name="kernel_snackbar">#3A3C42</color>
+    <color name="kernel_snackbar_text">#F2F3F5</color>
+    <color name="kernel_snackbar_action">#7AB7FF</color>
+    <color name="kernel_divider">#3F4247</color>
+    <color name="kernel_group">#2C2D31</color>
+    <color name="kernel_segment_track">#2C2D31</color>
+    <color name="kernel_segment_thumb">#3C3E44</color>
+    <color name="kernel_button_disabled">#3A3C42</color>
+    <color name="kernel_sheet_handle">#5F6368</color>
+    <color name="kernel_ripple">#33FFFFFF</color>
+</resources>

@@ -1,11 +1,13 @@
 package com.kernel.browser
 
 import android.content.Context
+import android.content.SharedPreferences
 import java.nio.charset.StandardCharsets
 import java.util.Base64
 
-class SessionStore(context: Context) {
-    private val preferences = context.getSharedPreferences("browser_sessions", Context.MODE_PRIVATE)
+class SessionStore internal constructor(private val preferences: SharedPreferences) {
+    constructor(context: Context) : this(context.getSharedPreferences("browser_sessions", Context.MODE_PRIVATE))
+    private val writer = LatestPreferenceWrite(preferences, KEY_NORMAL_TABS)
 
     data class Entry(
         val title: String,
@@ -18,12 +20,12 @@ class SessionStore(context: Context) {
     }
 
     fun save(entries: List<Entry>) {
-        val payload = SessionStoreCodec.encode(entries)
-        preferences.edit().putString(KEY_NORMAL_TABS, payload).apply()
+        val snapshot = entries.toList()
+        writer.put { SessionStoreCodec.encode(snapshot) }
     }
 
     fun clear() {
-        preferences.edit().remove(KEY_NORMAL_TABS).apply()
+        writer.remove()
     }
 
     private companion object {

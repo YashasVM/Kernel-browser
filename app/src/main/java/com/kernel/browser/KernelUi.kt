@@ -32,7 +32,8 @@ object KernelUi {
             letterSpacing = 0.06f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(context.getColor(R.color.kernel_muted))
-            setPadding(dp(context, 18), dp(context, 22), dp(context, 18), dp(context, 8))
+            // 16dp: the same start inset as the rows in the group below, so the text lines up.
+            setPadding(dp(context, 16), dp(context, 24), dp(context, 16), dp(context, 8))
         }
     }
 
@@ -42,7 +43,7 @@ object KernelUi {
             textSize = 13f
             setLineSpacing(dp(context, 2).toFloat(), 1f)
             setTextColor(context.getColor(R.color.kernel_muted))
-            setPadding(dp(context, 18), dp(context, 8), dp(context, 18), 0)
+            setPadding(dp(context, 16), dp(context, 8), dp(context, 16), 0)
         }
     }
 
@@ -86,9 +87,43 @@ object KernelUi {
             }
             addView(ImageView(context).apply {
                 setImageResource(icon)
-                imageTintList = ColorStateList.valueOf(context.getColor(android.R.color.white))
+                imageTintList = ColorStateList.valueOf(context.getColor(R.color.kernel_on_tile))
                 scaleType = ImageView.ScaleType.FIT_CENTER
             }, FrameLayout.LayoutParams(dp(context, 19), dp(context, 19), Gravity.CENTER))
+        }
+    }
+
+    /** A colored tile with the first letter of [label], for sites that have no icon of their own. */
+    fun letterTile(context: Context, label: String, key: String = label): TextView {
+        val palette = intArrayOf(R.color.tile_blue, R.color.tile_red, R.color.tile_green, R.color.tile_purple,
+            R.color.tile_orange, R.color.tile_teal, R.color.tile_pink, R.color.tile_indigo)
+        val letter = label.firstOrNull { it.isLetterOrDigit() }?.uppercaseChar()?.toString() ?: "?"
+        return TextView(context).apply {
+            text = letter
+            gravity = Gravity.CENTER
+            textSize = 15f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(context.getColor(R.color.kernel_on_tile))
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            background = GradientDrawable().apply {
+                setColor(context.getColor(palette[(key.hashCode() and 0x7fffffff) % palette.size]))
+                cornerRadius = dp(context, 9).toFloat()
+            }
+        }
+    }
+
+    /** A 48dp "more" button for a row's secondary actions. */
+    fun moreButton(context: Context, description: String, onClick: () -> Unit): ImageView {
+        return ImageView(context).apply {
+            setImageResource(R.drawable.ic_more)
+            imageTintList = ColorStateList.valueOf(context.getColor(R.color.kernel_muted))
+            scaleType = ImageView.ScaleType.CENTER
+            background = selectableItemBackground(context)
+            contentDescription = description
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { onClick() }
+            layoutParams = LinearLayout.LayoutParams(dp(context, 44), dp(context, 44))
         }
     }
 

@@ -6,6 +6,7 @@ import java.util.Base64
 
 class DownloadStore(context: Context) {
     private val preferences = context.getSharedPreferences("browser_downloads", Context.MODE_PRIVATE)
+    private var cache: List<Entry>? = null
 
     data class Entry(
         val id: Long,
@@ -15,7 +16,8 @@ class DownloadStore(context: Context) {
     )
 
     fun entries(): List<Entry> {
-        return DownloadStoreCodec.decode(preferences.getString(KEY_ENTRIES, ""))
+        // Menus ask for the count each time they open; decode once.
+        return cache ?: DownloadStoreCodec.decode(preferences.getString(KEY_ENTRIES, "")).also { cache = it }
     }
 
     fun record(id: Long, title: String, url: String, fileName: String) {
@@ -33,10 +35,12 @@ class DownloadStore(context: Context) {
     }
 
     fun clear() {
+        cache = emptyList()
         preferences.edit().remove(KEY_ENTRIES).apply()
     }
 
     private fun save(entries: List<Entry>) {
+        cache = entries.take(DownloadStoreCodec.MAX_ENTRIES)
         val payload = DownloadStoreCodec.encode(entries)
         preferences.edit().putString(KEY_ENTRIES, payload).apply()
     }
