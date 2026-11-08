@@ -84,6 +84,7 @@ class MainActivity : Activity() {
     private lateinit var pagePrinter: PagePrinter
     private val pageTranslator = PageTranslator { showMessage(it) }
     private val tabThumbnails = mutableMapOf<Long, Bitmap>()
+    private val thumbnailCaptures = ThumbnailCaptureGuard<GeckoSession>()
     private var bottomInset = 0
     private var chromeHidden = false
     private var addressBarEditing = false
@@ -279,6 +280,7 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        thumbnailCaptures.clear()
         chromeHandler.removeCallbacksAndMessages(null)
         if (isFinishing) {
             saveNormalSession()
@@ -294,6 +296,7 @@ class MainActivity : Activity() {
     }
 
     @Deprecated("Kept for Android 12 and older; newer versions use the OnBackInvokedCallback below.")
+    @android.annotation.SuppressLint("GestureBackNavigation")
     override fun onBackPressed() {
         if (!handleBack()) super.onBackPressed()
     }
@@ -336,10 +339,11 @@ class MainActivity : Activity() {
         return tabs.all().firstOrNull { it.id == parentId }
     }
 
-    /** Back on a tab a link opened closes it and returns to the page that opened it, like Chrome. */
+    /** Back on a tab a link opened closes it and returns to the page that opened it. */
     private fun returnToParentTab(tab: BrowserTab): Boolean {
         val parent = parentTabOf(tab) ?: return false
         rememberClosedTab(tab)
+        thumbnailCaptures.invalidate(tab.id)
         tabThumbnails.remove(tab.id)
         tabs.close(tab.id)
         attachTab(parent)
@@ -349,28 +353,24 @@ class MainActivity : Activity() {
     }
 
     private fun restoreTabsOrCreateHome(intent: Intent?) {
-        val savedTabs = sessionStore.restore()
-        // Restore saved tabs even when launched with a link: the next session save would
-        // otherwise overwrite them with just the linked tab. They load lazily, so this is cheap.
-        val restoredTabs = savedTabs.ifEmpty {
-            if (IncomingIntentReader.urlFor(intent, browserPreferences.searchEngine) != null) emptyList()
-            else listOf(SessionStore.Entry("Home", StartPage.SESSION_URL, ""))
-        }
-        // Only the selected (last) tab loads now; the others wait, unopened, until first shown.
-        restoredTabs.forEach { entry ->
-            val tab = tabs.create(TabMode.NORMAL, open = false)
-            tab.title = entry.title
-            tab.url = entry.url.takeUnless { it == StartPage.SESSION_URL }.orEmpty()
-            tab.sessionState = entry.state
-            tab.sessionStateUrl = tab.url
-            tab.pendingRestore = BrowserTab.PendingRestore(tab.url, entry.state)
-        }
-        if (openIntentUri(intent)) return
-        tabs.activeTab?.let(::attachTab)
+        SessionStartup.restore(
+            savedTabs = sessionStore.restore(),
+            hasIncomingLink = IncomingIntentReader.urlFor(intent, browserPreferences.searchEngine) != null,
+            home = { SessionStore.Entry("Home", StartPage.SESSION_URL, "") },
+            restoreTab = { entry, select ->
+                val tab = tabs.create(TabMode.NORMAL, open = false)
+                tab.title = entry.title
+                tab.url = entry.url.takeUnless { it == StartPage.SESSION_URL }.orEmpty()
+                tab.sessionState = entry.state
+                tab.sessionStateUrl = tab.url
+                tab.pendingRestore = BrowserTab.PendingRestore(tab.url, entry.state)
+                if (select) attachTab(tab)
+            },
+            openIncomingLink = { openIntentUri(intent) }
+        )
     }
 
     private fun openIntentUri(intent: Intent?): Boolean {
-        // Links, shared text, web searches, and "Search with Kernel" selections from other apps.
         val uri = IncomingIntentReader.urlFor(intent, browserPreferences.searchEngine) ?: return false
 
         val tab = tabs.create(TabMode.NORMAL)
@@ -589,6 +589,7 @@ class MainActivity : Activity() {
             override fun onCloseRequest(session: GeckoSession) {
                 if (fullScreenSession == session) onFullScreenChanged(session, false)
                 rememberClosedTab(tab)
+                thumbnailCaptures.invalidate(tab.id)
                 tabThumbnails.remove(tab.id)
                 tabs.close(tab.id)
                 attachCurrentOrCreate()
@@ -834,7 +835,8 @@ class MainActivity : Activity() {
                 hasUserGesture: Boolean
             ) {
                 if (session != tab.session) return
-                // A new or restoring session reports about:blank first; keep the URL it is opening.
+                thumbnailCaptures.invalidate(tab.id)
+                // Keep the URL being restored when Gecko first reports about:blank.
                 if (isInitialBlank(tab, url)) return
                 tab.url = StartPage.displayUrl(url)
                 if (tab == tabs.activeTab) refreshAddressText()
@@ -885,6 +887,7 @@ class MainActivity : Activity() {
                 if (session != tab.session) return
                 if (tab == tabs.activeTab) markExtensionActiveTab(session) else tabResources.sendToBackground(tab)
                 tab.isLoading = true
+                thumbnailCaptures.invalidate(tab.id)
                 if (!isInitialBlank(tab, url)) tab.url = StartPage.displayUrl(url)
                 setChromeVisible(true)
                 updateUi()
@@ -1660,6 +1663,7 @@ class MainActivity : Activity() {
     private fun closeTabs(mode: TabMode) {
         tabs.all().filter { it.mode == mode }.forEach { tab ->
             rememberClosedTab(tab)
+            thumbnailCaptures.invalidate(tab.id)
             tabThumbnails.remove(tab.id)
             tabs.close(tab.id)
         }
@@ -2205,6 +2209,7 @@ class MainActivity : Activity() {
             createTab = { mode -> openNewTab(mode) },
             closeTab = { tab ->
                 rememberClosedTab(tab)
+                thumbnailCaptures.invalidate(tab.id)
                 tabThumbnails.remove(tab.id)
                 tabs.close(tab.id)
                 attachCurrentOrCreate()
@@ -2219,6 +2224,7 @@ class MainActivity : Activity() {
     private fun resetBrowserState() {
         sessionStore.clear()
         tabs.all().map { it.id }.forEach {
+            thumbnailCaptures.invalidate(it)
             tabThumbnails.remove(it)
             tabs.close(it)
         }
@@ -2254,7 +2260,10 @@ class MainActivity : Activity() {
     }
 
     private fun attachTab(tab: BrowserTab) {
-        tabs.activeTab?.let { active ->
+        // create() may already have selected the next tab while GeckoView still shows the old one.
+        tabs.all().firstOrNull { it.session === binding.geckoView.session }?.let { active ->
+            // A capture completing after setSession below is deliberately discarded: an older
+            // preview is preferable to attributing private pixels to a newly selected tab.
             captureThumbnail(active)
             fullScreenSession?.takeIf { it == active.session && active != tab }?.exitFullScreen()
         }
@@ -2297,28 +2306,32 @@ class MainActivity : Activity() {
         }
     }
 
-    /**
-     * Snapshots the visible page for the tab switcher. Old thumbnails are dropped, not recycled:
-     * an open switcher may still be drawing one, and recycling it there crashes the app.
-     */
     private fun captureThumbnail(tab: BrowserTab, onDone: (() -> Unit)? = null) {
-        if (tab.session != tabs.activeTab?.session || binding.geckoView.width <= 0 || binding.geckoView.height <= 0) {
+        if (isFinishing || isDestroyed || binding.geckoView.width <= 0 || binding.geckoView.height <= 0) {
+            onDone?.invoke()
+            return
+        }
+        val ticket = thumbnailCaptures.begin(tab.id, tab.session, binding.geckoView.session) ?: run {
             onDone?.invoke()
             return
         }
         binding.geckoView.capturePixels().accept({ bitmap ->
+            val liveSession = tabs.all().firstOrNull { it.id == tab.id }?.session
+            val owned = thumbnailCaptures.complete(ticket, liveSession, binding.geckoView.session)
             if (bitmap != null) {
-                val maxWidth = ChromeSheet.dp(this, TabResourceManager.THUMBNAIL_WIDTH_DP)
-                runCatching { TabResourceManager.compactThumbnail(bitmap, maxWidth) }
-                    .onFailure { SafeLog.warning("Thumbnail failed", it) }
-                    .getOrNull()
-                    ?.let { tabThumbnails[tab.id] = it }
-                // The thumbnail is a separate copy, so the full-size capture can go now.
+                if (owned && !isFinishing && !isDestroyed) {
+                    val maxWidth = ChromeSheet.dp(this, TabResourceManager.THUMBNAIL_WIDTH_DP)
+                    runCatching { TabResourceManager.compactThumbnail(bitmap, maxWidth) }
+                        .onFailure { SafeLog.warning("Thumbnail failed", it) }
+                        .getOrNull()
+                        ?.let { tabThumbnails[tab.id] = it }
+                }
+                // The switcher can still draw older thumbnails; only recycle the fresh capture.
                 bitmap.recycle()
             }
             onDone?.invoke()
         }, {
-            // Thumbnails are best-effort; browsing should never wait on capture.
+            thumbnailCaptures.complete(ticket, null, null)
             onDone?.invoke()
         })
     }

@@ -1,4 +1,4 @@
-<resources>
+<resources xmlns:tools="http://schemas.android.com/tools">
     <!-- Light framework base; values-night/styles.xml swaps in the dark one. -->
     <style name="Base.AppTheme" parent="@android:style/Theme.Material.Light.NoActionBar" />
 
@@ -10,7 +10,7 @@
         <item name="android:navigationBarColor">@color/kernel_background</item>
         <item name="android:statusBarColor">@color/kernel_background</item>
         <item name="android:windowLightStatusBar">@bool/kernel_light_system_bars</item>
-        <item name="android:windowLightNavigationBar">@bool/kernel_light_system_bars</item>
+        <item name="android:windowLightNavigationBar" tools:targetApi="27">@bool/kernel_light_system_bars</item>
         <item name="android:windowDrawsSystemBarBackgrounds">true</item>
         <item name="android:windowTranslucentStatus">false</item>
         <item name="android:windowTranslucentNavigation">false</item>
